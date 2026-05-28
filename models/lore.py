@@ -1,4 +1,5 @@
 from pydantic import BaseModel, Field
+from typing import Optional
 
 class Quote(BaseModel):
     text: str
@@ -14,14 +15,14 @@ class Location(BaseModel):
 class Character(BaseModel):
     name: str
     is_pc: bool = False
-    player_name: str | None = None
+    player_name: Optional[str] = None
     details: list[str] = Field(default_factory=list)
     supporting_quotes: list[Quote] = Field(default_factory=list)
 
 class HistoryEvent(BaseModel):
     description: str
     scope: str
-    chronological_position: int | None = None
+    chronological_position: Optional[int] = None
     supporting_quotes: list[Quote] = Field(default_factory=list)
 
 class OtherDetail(BaseModel):
