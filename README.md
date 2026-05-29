@@ -1,3 +1,4 @@
+Besties this is not done. Please be demure and don't use this, queen. I need it public for reasons.
 # wikitizer
 Agentic project (Claude Code) to wikify worldbuilding notes. Free basic alternative to sites like WorldAnvil.
 
