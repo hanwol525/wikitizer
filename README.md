@@ -2,6 +2,6 @@
 Agentic project (Claude Code) to wikify worldbuilding notes. Free basic alternative to sites like WorldAnvil.
 
 
-TO USE (iMessage logs; BUILD OUT ACTUAL DOCUMENTATION LATER):
-1. Load .txt chat logs into "logs" folder
-2. Run build_speaker_map.py to verify name-number pairs and name the exporter
+## Usage (iMessage logs)
+1. Place exported `.txt` chat logs in `logs/` (do **not** commit logs; they may contain personal data).
+2. Run `python scripts/build_speaker_map.py` to generate `config/speaker_map.json` and verify name/number pairs.
