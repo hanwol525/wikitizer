@@ -75,9 +75,10 @@ def _leading_spaces(line: str) -> int:
     return len(line) - len(line.lstrip(" "))
 
 
-def _resolve_group_sender(m_phone, m_bare, speaker_map: dict, source_name: str) -> str:
-    """Group mode: the footer phone is the exact sender; a bare footer is the
-    exporter. An unknown phone falls back to the raw number (and a warning)."""
+def _resolve_group_sender(m_phone, speaker_map: dict, source_name: str) -> str:
+    """Group mode: the footer phone is the exact sender; a bare footer (no
+    ``m_phone`` match) is the exporter. An unknown phone falls back to the raw
+    number (and a warning)."""
     if m_phone:
         phone = m_phone.group(1)
         name = speaker_map.get(phone)
@@ -88,7 +89,7 @@ def _resolve_group_sender(m_phone, m_bare, speaker_map: dict, source_name: str) 
     return speaker_map.get("exporter", "exporter")
 
 
-def _resolve_oneonone_sender(buffer: list, other_number: Optional[str], speaker_map: dict) -> str:
+def _resolve_oneonone_sender(buffer: list, other_number: str, speaker_map: dict) -> str:
     """1-on-1 mode: no phones exist, so attribute by body alignment.
 
     Right-aligned (indented past the threshold) = exporter; left-aligned
@@ -191,8 +192,9 @@ def parse_chat_log(filepath: str, speaker_map: dict) -> list[Message]:
             # Close the message the buffer holds. The footer's PHONE names *this*
             # message; its TIMESTAMP belongs to the NEXT one, so carry it forward.
             if is_group:
-                sender = _resolve_group_sender(m_phone, m_bare, speaker_map, source_name)
+                sender = _resolve_group_sender(m_phone, speaker_map, source_name)
             else:
+                assert other_number is not None  # not-group implies header set this
                 sender = _resolve_oneonone_sender(buffer, other_number, speaker_map)
 
             if pending_ts is None:
@@ -220,6 +222,7 @@ def parse_chat_log(filepath: str, speaker_map: dict) -> list[Message]:
         if is_group:
             sender, body_lines = _recover_group_final_sender(buffer, speaker_map, source_name)
         else:
+            assert other_number is not None  # not-group implies header set this
             sender, body_lines = _resolve_oneonone_sender(buffer, other_number, speaker_map), buffer
         content = _clean_body(body_lines)
         if content:
