@@ -46,10 +46,10 @@ _IMAGE_REACTIONS = (
 # Emoji reactions: the emoji in the middle changes every time, so a fixed
 # string can't catch them -- needs a regex. ``“`` is the curly quote again.
 _EMOJI_REACTION = re.compile(
-    r"^Reacted .+? to “"            # Reacted <emoji> to "..."
+    r"^Reacted .+? to “"                 # Reacted <emoji> to “...”
     r"|^Reacted .+? to an image$"        # Reacted <emoji> to an image
-    r"|^Reaccionó con .+? a “"      # Reaccionó con <emoji> a "..."
-    r"|^Reaccionó con .+? a una imagen$"
+    r"|^Reaccionó con .+? a “"           # Reaccionó con <emoji> a “...”
+    r"|^Reaccionó con .+? a una imagen$" # Reaccionó con <emoji> a una imagen
 )
 
 
