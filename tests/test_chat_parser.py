@@ -358,3 +358,34 @@ def test_empty_file_returns_empty(tmp_path):
     path = tmp_path / "empty.txt"
     path.write_bytes(b"")
     assert parse_chat_log(str(path), SPEAKER_MAP) == []
+
+def test_oneonone_truncated_final_message_recovered_by_alignment(tmp_path):
+    # 1-on-1 files have no phone footers and (like every real export) end
+    # mid-message with the final footer cut off. The last message must still be
+    # recovered, with its sender read from body alignment, not dropped.
+    indent = " " * 30
+    log = write_log(tmp_path, [
+        "+15555550101", DASHES,
+        "01/02/2024 10:00:00",
+        "left aligned so this is the other person",
+        indent + "01/02/2024 10:05:00",
+        indent + "right aligned final message with no closing footer",
+    ], name="dm_convo.txt")
+    msgs = parse_chat_log(log, SPEAKER_MAP)
+    assert len(msgs) == 2
+    assert (msgs[0].sender, msgs[0].content) == ("Alice", "left aligned so this is the other person")
+    assert (msgs[1].sender, msgs[1].content) == ("Hannah", "right aligned final message with no closing footer")
+    assert msgs[1].timestamp == datetime(2024, 1, 2, 10, 5, 0)
+
+def test_body_with_no_footer_anywhere_is_dropped_with_warning(tmp_path, caplog):
+    # No footer ever appears, so no timestamp is seeded. The orphan body can't
+    # become a Message -> dropped with a warning rather than crashing.
+    log = write_log(tmp_path, [
+        ", +15555550101", DASHES,
+        "a body line with no footer ever",
+        "another orphan line",
+    ])
+    with caplog.at_level(logging.WARNING):
+        msgs = parse_chat_log(log, SPEAKER_MAP)
+    assert msgs == []
+    assert "Dropping" in caplog.text
