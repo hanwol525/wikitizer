@@ -103,7 +103,8 @@ class BaseAgent:
         self.temperature = temperature
         self.max_tokens = max_tokens
         self.max_json_retries = max_json_retries
-
+        if self.max_json_retries < 1:
+            raise ValueError("max_json_retries must be >= 1")
         # Dev-only on-disk response cache (see _cache_*). Off unless explicitly
         # turned on, so the real pipeline never silently serves stale answers.
         # The env var lets you flip it on for a whole prompt-tuning session
