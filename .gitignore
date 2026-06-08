@@ -204,6 +204,9 @@ cython_debug/
 tempCodeRunnerFile.py
 logs/
 
+# Dev-only LLM response cache (off by default; see agents/base.py)
+.llm_cache/
+
 # Ruff stuff:
 .ruff_cache/
 
