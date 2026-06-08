@@ -157,9 +157,12 @@ class BaseAgent:
         if self._cache_enabled:
             cached = self._cache_get(system_prompt, user_message)
             if cached is not None:
-                # Only parsed-good text is ever stored, so this is safe.
-                return json.loads(strip_code_fences(cached))
-
+                # Only parsed-good text is ever stored, but the on-disk cache file
+                # can still be corrupted/truncated; treat that as a cache miss.
+                try:
+                    return json.loads(strip_code_fences(cached))
+                except json.JSONDecodeError:
+                    logger.warning("Ignoring corrupted LLM cache entry; re-calling Claude")
         last_raw: Optional[str] = None
         for attempt in range(1, self.max_json_retries + 1):
             last_raw = self.call_claude(system_prompt, user_message)
