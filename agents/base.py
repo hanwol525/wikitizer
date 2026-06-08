@@ -197,7 +197,7 @@ class BaseAgent:
     def _cache_key(self, system_prompt: str, user_message: str) -> str:
         h = hashlib.sha256()
         # NUL separators so different field boundaries can't collide.
-        for part in (self.model, system_prompt, user_message):
+        for part in (self.model, str(self.temperature), str(self.max_tokens), system_prompt, user_message):
             h.update(part.encode("utf-8"))
             h.update(b"\x00")
         return h.hexdigest()
