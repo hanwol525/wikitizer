@@ -165,6 +165,10 @@ class BaseAgent:
             last_raw = self.call_claude(system_prompt, user_message)
             try:
                 parsed = json.loads(strip_code_fences(last_raw))
+                if not isinstance(parsed, (dict, list)):
+                    raise json.JSONDecodeError(
+                        "JSON must be an object or array", strip_code_fences(last_raw), 0
+                    )
             except json.JSONDecodeError as exc:
                 logger.warning(
                     "Claude returned invalid JSON (attempt %d/%d): %s",
