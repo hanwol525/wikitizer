@@ -81,6 +81,8 @@ class NoiseFilterAgent(BaseAgent):
     """
 
     def __init__(self, batch_size: int = 50, **kwargs):
+        if batch_size < 1:
+            raise ValueError("batch_size must be >= 1")
         # Haiku: this is the highest-volume agent (sees every surviving message),
         # and labeling into 4 buckets needs speed + low cost, not deep reasoning.
         kwargs.setdefault("model", "claude-haiku-4-5-20251001")
