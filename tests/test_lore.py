@@ -31,8 +31,21 @@ def test_character_defaults():
     npc = Character(name="Wizard Strong")
     assert npc.is_pc is False
     assert npc.player_name is None
-    assert npc.details == []          
+    assert npc.aliases == []
+    assert npc.details == []
     assert npc.supporting_quotes == []
+
+
+def test_character_with_aliases_round_trips():
+    kriggy = Character(name="Kriggy", aliases=["Kriggy Krieger"])
+    assert kriggy.aliases == ["Kriggy Krieger"]
+
+
+def test_two_characters_dont_share_an_aliases_list():
+    a = Character(name="Kriggy")
+    b = Character(name="Tiberius")
+    a.aliases.append("Kriggy Krieger")
+    assert b.aliases == []
 
 
 def test_player_character():
