@@ -14,6 +14,7 @@ class Location(BaseModel):
 
 class Character(BaseModel):
     name: str
+    aliases: list[str] = Field(default_factory=list)
     is_pc: bool = False
     player_name: Optional[str] = None
     details: list[str] = Field(default_factory=list)
