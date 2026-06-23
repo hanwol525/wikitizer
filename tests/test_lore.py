@@ -1,6 +1,6 @@
 import pytest
 from pydantic import ValidationError
-from models.lore import Quote, Location, Character, HistoryEvent, OtherDetail
+from models.lore import Quote, Location, Character, HistoryEvent, OtherDetail, Scope
 
 
 def test_quote_builds_with_all_fields():
@@ -56,10 +56,50 @@ def test_player_character():
 
 def test_history_event_unplaceable():
     event = HistoryEvent(
+        name="Rise of the Aldward Family",
         description="The Aldward family rose to prominence.",
         scope="personal",
     )
     assert event.chronological_position is None
+
+
+def test_history_event_with_name_and_aliases_round_trips():
+    event = HistoryEvent(
+        name="The Maltraav-Kriega War",
+        aliases=["the Border War"],
+        description="A brutal war between Maltraav and Kriega.",
+        scope="regional",
+    )
+    assert event.name == "The Maltraav-Kriega War"
+    assert event.aliases == ["the Border War"]
+
+
+def test_history_event_aliases_default_empty():
+    event = HistoryEvent(name="x", description="y", scope="world")
+    assert event.aliases == []
+
+
+def test_history_event_scope_enum_rejects_off_menu_value():
+    with pytest.raises(ValidationError):
+        HistoryEvent(name="x", description="y", scope="banana")
+
+
+def test_history_event_scope_string_coerces_to_enum_member():
+    event = HistoryEvent(name="x", description="y", scope="personal")
+    assert event.scope is Scope.PERSONAL
+
+
+def test_history_event_requires_name():
+    # name is now a required field (no default) -> omitting it must raise, so a
+    # regression that gave it a default wouldn't slip past.
+    with pytest.raises(ValidationError):
+        HistoryEvent(description="y", scope="world")
+
+
+def test_scope_member_equals_its_text():
+    # The (str, Enum) mix-in: a member compares equal to its string value, which
+    # is what lets renderer code keep doing `event.scope == "world"`.
+    assert Scope.WORLD == "world"
 
 
 def test_two_locations_dont_share_a_list():
