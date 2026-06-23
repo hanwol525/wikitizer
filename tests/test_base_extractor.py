@@ -188,6 +188,20 @@ def test_resolve_quote_rejects_out_of_range_source_id(caplog):
     assert any("out of range" in r.getMessage() for r in caplog.records)
 
 
+def test_resolve_quote_rejects_non_string_quote(caplog):
+    # A non-string quote (e.g. an int) must be dropped up front -- otherwise it
+    # would reach _quote_is_verbatim, whose .replace() on a non-str raises an
+    # uncaught AttributeError and crashes the whole batch.
+    batch = [make_message("Lake Mundi is huge")]
+    agent = make_base_extractor()
+
+    with caplog.at_level(logging.WARNING, logger="agents.base_extractor"):
+        q = agent._resolve_quote(123, 0, batch)
+
+    assert q is None
+    assert any("non-string quote" in r.getMessage() for r in caplog.records)
+
+
 # --- the _build_entry seam must be filled in by subclasses -------------------
 
 def test_base_build_entry_raises_not_implemented():

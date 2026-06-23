@@ -162,29 +162,29 @@ class BaseExtractor(BaseAgent):
                 built.append(entry)
         return built
 
-def _resolve_quote(self, quote_text, source_id, batch: list[Message]) -> Optional[Quote]:
-    """Turn Claude's ``(quote_text, source_id)`` into a :class:`Quote` whose
-    speaker/source come from the cited message -- or ``None`` (logged) if the
-    id is unusable or the quote isn't verbatim in that message.
+    def _resolve_quote(self, quote_text, source_id, batch: list[Message]) -> Optional[Quote]:
+        """Turn Claude's ``(quote_text, source_id)`` into a :class:`Quote` whose
+        speaker/source come from the cited message -- or ``None`` (logged) if the
+        id is unusable or the quote isn't verbatim in that message.
 
-    Logs the specific reason so a subclass's ``_build_entry`` doesn't need to
-    re-log when this returns ``None``.
-    """
-    if not isinstance(quote_text, str):
-        logger.warning(
-            "Detail cites a non-string quote %r; dropping this detail.", quote_text
-        )
-        return None
-    # Guard the id's TYPE first. ``isinstance(True, int)`` is True in Python,
-    # so a ``true``/``false`` source_id would sneak through and index the
-    # batch as 0/1 (``batch[True] == batch[1]``), silently attaching the wrong
-    # message's quote+speaker. ``type(...) is int`` rejects bool too -- same
-    # trap the noise filter guards.
-    if type(source_id) is not int:
-        logger.warning(
-            "Detail cites a non-integer source_id %r; dropping this detail.", source_id
-        )
-        return None
+        Logs the specific reason so a subclass's ``_build_entry`` doesn't need to
+        re-log when this returns ``None``.
+        """
+        if not isinstance(quote_text, str):
+            logger.warning(
+                "Detail cites a non-string quote %r; dropping this detail.", quote_text
+            )
+            return None
+        # Guard the id's TYPE first. ``isinstance(True, int)`` is True in Python,
+        # so a ``true``/``false`` source_id would sneak through and index the
+        # batch as 0/1 (``batch[True] == batch[1]``), silently attaching the wrong
+        # message's quote+speaker. ``type(...) is int`` rejects bool too -- same
+        # trap the noise filter guards.
+        if type(source_id) is not int:
+            logger.warning(
+                "Detail cites a non-integer source_id %r; dropping this detail.", source_id
+            )
+            return None
         if not (0 <= source_id < len(batch)):
             logger.warning(
                 "Detail cites source_id %d out of range for this batch of %d; "
