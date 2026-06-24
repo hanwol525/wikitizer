@@ -1,8 +1,9 @@
 """Phase 3.3 (Step 2): the shared base class every *extractor* agent inherits.
 
 The noise filter is a classifier and inherits :class:`~agents.base.BaseAgent`
-directly. The extractors (locations now; characters/history/other to come) share
-a second layer on top of that: the same batching loop, the same batch-local-id
+directly. The extractors (locations, characters, history; organizations, items,
+people & cultures) share a second layer on top of that: the same
+batching loop, the same batch-local-id
 wire format, the same verbatim-quote resolution and verification. That shared
 spine lives here so each concrete extractor is just *a prompt + a model +
 ``_build_entry``*.
