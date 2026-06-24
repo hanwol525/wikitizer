@@ -43,7 +43,7 @@ logger = logging.getLogger(__name__)
 
 SYSTEM_PROMPT = """You are a worldbuilding extractor for an exported D&D group chat. The campaign is a homebrew tabletop game set in a fictional world. Your job is to find every NAMED location in the messages and extract structured facts about it. You do not classify the chat, summarize it, or invent anything.
 
-A "named location" is any place with a proper name: a lake, mountain range, city, country, region, landmark, building, etc. Examples: "Lake Mundi", "the Cloud Mountains", "Gol", "Eglon". Do NOT extract generic, unnamed places like "the forest", "a tavern", or "the dungeon" unless they are given a proper name.
+A "named location" is any place with a proper name: a lake, mountain range, city, country, region, landmark, building, etc. Examples: "Lake Mundi", "the Cloud Mountains", "Gol", "Eglon". Do NOT extract generic, unnamed places like "the forest", "a tavern", or "the dungeon" unless they are given a proper name. A realm or nation is both a place and a political power. Capture it here as a PLACE — its geography, territory, and where it sits — and leave its government and how it is ruled to the organizations extractor; you do not need to describe its politics.
 
 For each named location, extract:
 - name: the location's primary/canonical name.

@@ -1,6 +1,9 @@
 import pytest
 from pydantic import ValidationError
-from models.lore import Quote, Location, Character, HistoryEvent, OtherDetail, Scope
+from models.lore import (
+    Quote, Location, Character, HistoryEvent, Scope,
+    Organization, Item, PeopleAndCultures,
+)
 
 
 def test_quote_builds_with_all_fields():
@@ -117,3 +120,32 @@ def test_missing_required_field_raises():
 def test_wrong_type_raises():
     with pytest.raises(ValidationError):
         Location(name="Kriega", supporting_quotes="not a list of quotes")
+
+
+# --- typed lore categories (Organization / Item / PeopleAndCultures) ---------
+# All three are exact Location-shaped clones, so a parametrized sweep keeps these
+# DRY rather than nine near-identical functions.
+
+@pytest.mark.parametrize("Model", [Organization, Item, PeopleAndCultures])
+def test_typed_lore_defaults(Model):
+    obj = Model(name="Test")
+    assert obj.aliases == [] and obj.details == [] and obj.supporting_quotes == []
+
+
+@pytest.mark.parametrize("Model", [Organization, Item, PeopleAndCultures])
+def test_typed_lore_round_trips(Model):
+    obj = Model(name="Test", aliases=["alt"], details=["a fact"])
+    assert obj.name == "Test" and obj.aliases == ["alt"]
+
+
+@pytest.mark.parametrize("Model", [Organization, Item, PeopleAndCultures])
+def test_typed_lore_no_shared_aliases_list(Model):
+    a, b = Model(name="A"), Model(name="B")
+    a.aliases.append("x")
+    assert b.aliases == []
+
+
+@pytest.mark.parametrize("Model", [Organization, Item, PeopleAndCultures])
+def test_typed_lore_requires_name(Model):
+    with pytest.raises(ValidationError):
+        Model()   # name has no default -> omitting it must raise

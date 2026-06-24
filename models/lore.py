@@ -45,6 +45,28 @@ class HistoryEvent(BaseModel):
     chronological_position: Optional[int] = None
     supporting_quotes: list[Quote] = Field(default_factory=list)
 
-class OtherDetail(BaseModel):
-    detail: str
+# The three typed categories below replace the retired `OtherDetail` catch-all.
+# Each is shaped EXACTLY like Location (same four fields) on purpose: the Phase
+# 4.1 reconciler dedups all six entity types with the same name+alias matching,
+# and the renderer treats them uniformly. The category-specific discipline lives
+# in each one's extractor prompt, not in the schema.
+
+class Organization(BaseModel):
+    name: str
+    aliases: list[str] = Field(default_factory=list)
+    details: list[str] = Field(default_factory=list)
+    supporting_quotes: list[Quote] = Field(default_factory=list)
+
+class Item(BaseModel):
+    name: str
+    aliases: list[str] = Field(default_factory=list)
+    details: list[str] = Field(default_factory=list)
+    supporting_quotes: list[Quote] = Field(default_factory=list)
+
+# PascalCase identifier; the pretty "People & Cultures" display label lives in
+# the renderer (a Python name can't hold a space or the bare word `and`).
+class PeopleAndCultures(BaseModel):
+    name: str
+    aliases: list[str] = Field(default_factory=list)
+    details: list[str] = Field(default_factory=list)
     supporting_quotes: list[Quote] = Field(default_factory=list)
