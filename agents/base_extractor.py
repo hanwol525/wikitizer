@@ -2,7 +2,7 @@
 
 The noise filter is a classifier and inherits :class:`~agents.base.BaseAgent`
 directly. The extractors (locations, characters, history; organizations, items,
-people & cultures to come) share a second layer on top of that: the same
+people & cultures) share a second layer on top of that: the same
 batching loop, the same batch-local-id
 wire format, the same verbatim-quote resolution and verification. That shared
 spine lives here so each concrete extractor is just *a prompt + a model +
