@@ -10,6 +10,15 @@ conftest is imported before any test module, so the key is already in
 A no-op (returns False) when there's no ``.env``, so it's always safe to call.
 """
 
-from dotenv import load_dotenv
+import os
+from pathlib import Path
 
-load_dotenv()
+from dotenv import dotenv_values
+
+# Only load the API key needed for integration-test gating, to avoid `.env`
+# side-effects on unit tests (e.g. WIKITIZER_LLM_CACHE).
+_env_path = Path(__file__).with_name(".env")
+if _env_path.exists() and not os.getenv("ANTHROPIC_API_KEY"):
+    api_key = dotenv_values(_env_path).get("ANTHROPIC_API_KEY")
+    if api_key:
+        os.environ["ANTHROPIC_API_KEY"] = api_key
