@@ -220,3 +220,10 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Phase 3.10 extractor integration tests: keep real chat + raw source list out of
+# the public repo, and the generated eyeball reports too. The committed synthetic
+# fixtures (tests/fixtures/synthetic_messages.py) stay tracked.
+tests/fixtures/real_messages.py
+tests/output/
+phase-3.10-test-messages.md
