@@ -1,0 +1,66 @@
+"""Phase 4.1a: the *decision* objects the reconciler LLM hands back.
+
+The reconciler never builds merged entries itself. It only emits a DECISION --
+"entries 3 and 7 are the same thing, call the result 'Lake Mundi'" -- and a
+pure-Python combiner (in agents/reconciler.py) does the actual fact-merging from
+the ORIGINAL entry objects. These models are the contract between those two
+halves: the only things the LLM is allowed to say.
+
+One model set covers all six entity types, because a decision is just indices +
+names; it never names a field that's specific to Characters or History.
+"""
+
+from pydantic import BaseModel, Field
+
+
+class DetailConflict(BaseModel):
+    """One pair of details (from two entries being merged) that the LLM judged to
+    genuinely DISAGREE -- e.g. "ruled by X" vs "ruled by Y". Carries the text and
+    source of each side so the human reviewer can act on it.
+
+    Purely informational: Python keeps BOTH details in the merged entry and just
+    logs this; it never drops either side. We carry the TEXT here (not a "detail
+    #2" coordinate) on purpose -- our stored detail/quote lists don't keep a clean
+    index-to-index mapping, so a coordinate would be fragile. A reworded note here
+    is harmless: the real detail is still carried verbatim by Python in the merged
+    entry; this object is only a pointer for the review queue.
+    """
+    detail_a: str
+    source_a: str
+    detail_b: str
+    source_b: str
+    note: str = ""  # the LLM's plain-English "why these disagree", for the reviewer
+
+
+class MergeGroup(BaseModel):
+    """One set of entries the LLM is CONFIDENT are the same entity.
+
+    `members` are INDICES into the input list (so [3, 7] means "the 4th and 8th
+    entries are one thing", counting from 0). `canonical` is the winning name for
+    the merged entry's heading; Python rejects it unless it's a name/alias that
+    already appears among those members (so even the heading can't be invented).
+    `conflicts` is usually empty -- it only fills when two merged details disagree.
+    """
+    members: list[int]
+    canonical: str
+    conflicts: list[DetailConflict] = Field(default_factory=list)
+
+
+class PossibleDuplicate(BaseModel):
+    """A pair the LLM found SUSPICIOUS but wasn't confident enough to merge, so it
+    deliberately left them separate. These never get merged; Python just writes a
+    findable log line so you can confirm/reject them by hand later."""
+    members: list[int]
+    note: str = ""
+
+
+class ReconcileDecision(BaseModel):
+    """The whole thing the LLM returns for one entity-type list.
+
+    Anything NOT named in `merges` is implicitly a singleton -- the LLM never
+    echoes unique entries back, which keeps the common case cheap. A list with no
+    duplicates returns both lists empty, and Python passes the input straight
+    through untouched.
+    """
+    merges: list[MergeGroup] = Field(default_factory=list)
+    possible_duplicates: list[PossibleDuplicate] = Field(default_factory=list)
