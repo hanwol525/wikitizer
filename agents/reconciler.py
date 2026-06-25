@@ -470,8 +470,15 @@ class Reconciler(BaseAgent):
         consumed = set()  # indices folded into a merge -> not also emitted as singletons
 
         for group in decision.merges:
-            members = [entries[i] for i in group.members]
-
+            try:
+                members = [entries[i] for i in group.members]
+            except IndexError:
+                logger.warning(
+                    "Reconciler[%s]: skipping merge group with out-of-range member index: %s",
+                    label,
+                    group.members,
+                )
+                continue
             # Defense-in-depth: a merge needs >= 2 members. _validate_decision
             # already rejects smaller groups (so this never fires in the real flow),
             # but guarding here means _apply can't be crashed by a malformed decision
