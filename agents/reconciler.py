@@ -498,9 +498,8 @@ class Reconciler(BaseAgent):
                 continue
 
             # merge stuck -> log any detail conflicts (rich + findable); keep BOTH sides.
-            for c in group.conflicts:
                 logger.warning("%s Reconciler[%s] contradiction in '%s': %r (%s) vs %r (%s) -- %s",
-                               REVIEW_PREFIX, label, group.canonical,
+                               REVIEW_PREFIX, label, merged_entry.name,
                                c.detail_a, c.source_a, c.detail_b, c.source_b, c.note)
 
             merged_out.append(merged_entry)
