@@ -427,6 +427,73 @@ def test_literal_empty_quotes_list_kept_and_flagged(caplog):
     assert any("no surviving verbatim quotes" in r.getMessage() for r in caplog.records)
 
 
+# --- date_text: verbatim capture, null when absent --------------------------
+
+def test_date_text_captured_verbatim():
+    messages = [make_message("the Sundering of 342 AR shattered the land")]
+    response = json.dumps([
+        {"name": "The Sundering", "aliases": [], "description": "A cataclysm.",
+         "scope": "world", "date_text": "342 AR",
+         "quotes": [{"quote": "the Sundering of 342 AR", "source_id": 0}]},
+    ])
+    event = make_agent([response]).extract(messages)[0]
+    assert event.date_text == "342 AR"  # exact, not normalized to a number
+
+
+def test_date_text_absent_defaults_to_none():
+    messages = [make_message("the war happened")]
+    response = json.dumps([
+        {"name": "The War", "aliases": [], "description": "A war happened.",
+         "scope": "regional",
+         "quotes": [{"quote": "the war happened", "source_id": 0}]},
+    ])
+    assert make_agent([response]).extract(messages)[0].date_text is None
+
+
+def test_date_text_non_string_or_blank_treated_as_none():
+    messages = [make_message("the war happened")]
+    numeric = json.dumps([
+        {"name": "The War", "aliases": [], "description": "A war happened.",
+         "scope": "regional", "date_text": 342,  # not a string -> None
+         "quotes": [{"quote": "the war happened", "source_id": 0}]},
+    ])
+    assert make_agent([numeric]).extract(messages)[0].date_text is None
+    blank = json.dumps([
+        {"name": "The War", "aliases": [], "description": "A war happened.",
+         "scope": "regional", "date_text": "   ",  # blank -> None
+         "quotes": [{"quote": "the war happened", "source_id": 0}]},
+    ])
+    assert make_agent([blank]).extract(messages)[0].date_text is None
+
+
+def test_date_text_whitespace_trimmed():
+    messages = [make_message("the Sundering of 342 AR")]
+    response = json.dumps([
+        {"name": "The Sundering", "aliases": [], "description": "A cataclysm.",
+         "scope": "world", "date_text": "  342 AR  ",
+         "quotes": [{"quote": "the Sundering of 342 AR", "source_id": 0}]},
+    ])
+    assert make_agent([response]).extract(messages)[0].date_text == "342 AR"
+
+
+def test_date_text_null_with_relative_clue_stays_none_and_keeps_description():
+    # The boundary intent hinges on: a RELATIVE clue is NOT a date. The mocked layer
+    # can't prove the model's judgment, but it CAN pin the extractor contract -- when
+    # Claude returns date_text=null alongside a description carrying the relative
+    # clue, the extractor stores None and leaves the clue untouched in the prose.
+    messages = [make_message("the Krieger Imperium was founded after the old kingdoms collapsed")]
+    response = json.dumps([
+        {"name": "Founding of the Imperium", "aliases": [],
+         "description": "The Krieger Imperium was founded after the old kingdoms collapsed.",
+         "scope": "world", "date_text": None,
+         "quotes": [{"quote": "the Krieger Imperium was founded after the old kingdoms collapsed",
+                     "source_id": 0}]},
+    ])
+    event = make_agent([response]).extract(messages)[0]
+    assert event.date_text is None
+    assert "after the old kingdoms collapsed" in event.description  # clue stays in the prose
+
+
 # --- module-level sanity ----------------------------------------------------
 
 def test_valid_scopes_constant_built_from_enum():

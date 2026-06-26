@@ -22,7 +22,7 @@ from models.reconcile import ReconcileDecision, MergeGroup, DetailConflict, Poss
 from agents.reconciler import (
     Reconciler, _combine_group, _resolve_scope, _resolve_player_name,
     _short_name_veto, _validate_decision, _dedup_quotes, _VetoMerge,
-    _resolve_canonical, _extract_json_object, REVIEW_PREFIX,
+    _resolve_canonical, _extract_json_object, REVIEW_PREFIX, _resolve_date_text,
 )
 
 
@@ -85,6 +85,56 @@ def test_history_merge_concatenates_descriptions_and_takes_broadest_scope():
     assert "The dynasty collapsed." in merged.description
     assert merged.scope == Scope.WORLD
     assert merged.chronological_position is None  # untouched until 4.1b
+
+
+# --- History merge carries date_text forward --------------------------------
+
+def test_history_merge_date_beats_none():
+    a = HistoryEvent(name="E1", description="The Empire fell.", scope="world",
+                     date_text="342 AR")
+    b = HistoryEvent(name="E2", description="The Empire fell.", scope="world")  # no date
+    merged = _combine_group([a, b], "E1")
+    assert merged.date_text == "342 AR"  # a stated date beats None
+
+
+def test_history_merge_date_clash_keeps_first():
+    a = HistoryEvent(name="E1", description="The Empire fell.", scope="world",
+                     date_text="342 AR")
+    b = HistoryEvent(name="E2", description="The Empire fell.", scope="world",
+                     date_text="343 AR")  # a different stated date
+    merged = _combine_group([a, b], "E1")
+    assert merged.date_text == "342 AR"  # keeps first; the other survives in quotes/description
+
+
+def test_resolve_date_text_all_none_is_none():
+    a = HistoryEvent(name="E1", description="x", scope="world")
+    b = HistoryEvent(name="E2", description="y", scope="world")
+    assert _resolve_date_text([a, b]) is None
+
+
+def test_history_merge_date_picks_stated_when_first_is_none():
+    # The discriminating case: the FIRST member has no date, the SECOND states one.
+    # The contract is "first STATED date wins" (the None-filter in
+    # _resolve_date_text), NOT a naive "members[0].date_text" -- so the second
+    # member's date must come through, not None.
+    a = HistoryEvent(name="E1", description="The Empire fell.", scope="world")  # no date
+    b = HistoryEvent(name="E2", description="The Empire fell.", scope="world",
+                     date_text="343 AR")
+    merged = _combine_group([a, b], "E1")
+    assert merged.date_text == "343 AR"
+
+
+def test_history_merge_date_clash_logs_at_debug_not_review(caplog):
+    # A date clash is a QUIET auto-resolution: it must log at DEBUG and must NOT
+    # carry the [REVIEW] prefix. [REVIEW] is reserved for the human review queue;
+    # a clash is non-destructive (the losing date survives in the quotes), so
+    # escalating it to a loud flag would wrongly pollute Phase 5.3's review.txt.
+    a = HistoryEvent(name="E1", description="x", scope="world", date_text="342 AR")
+    b = HistoryEvent(name="E2", description="y", scope="world", date_text="343 AR")
+    with caplog.at_level(logging.DEBUG, logger="agents.reconciler"):
+        _combine_group([a, b], "E1")
+    assert any("date_text clash" in r.getMessage() for r in caplog.records)
+    assert not any(REVIEW_PREFIX in r.getMessage() for r in caplog.records)
 
 
 # --- scalars: player_name -------------------------------------------------
@@ -386,6 +436,31 @@ def test_apply_logs_conflict_with_review_prefix_and_keeps_both_details(caplog):
     assert "ruled by the Maltraav" in result[0].details
     assert any(REVIEW_PREFIX in r.getMessage() and "contradiction" in r.getMessage()
                for r in caplog.records)
+
+
+def test_apply_logs_one_review_line_per_conflict(caplog):
+    # Guards the restored `for c in group.conflicts:` loop against a subtle
+    # re-regression that collapses it to a single log: TWO conflicts must produce
+    # TWO contradiction lines (one per conflict), not one summary line. This is the
+    # behavior a botched auto-fix once silently dropped, so it's worth pinning hard.
+    a = loc("Riverton", details=["ruled by the Kriega", "founded in spring"])
+    b = loc("Lakeside Keep", details=["ruled by the Maltraav", "founded in autumn"])
+    conflicts = [
+        DetailConflict(detail_a="ruled by the Kriega", source_a="a.txt",
+                       detail_b="ruled by the Maltraav", source_b="b.txt", note="rulers differ"),
+        DetailConflict(detail_a="founded in spring", source_a="a.txt",
+                       detail_b="founded in autumn", source_b="b.txt", note="seasons differ"),
+    ]
+    decision = ReconcileDecision(merges=[
+        MergeGroup(members=[0, 1], canonical="Riverton", conflicts=conflicts)
+    ])
+    rec = Reconciler.__new__(Reconciler)
+    with caplog.at_level(logging.WARNING, logger="agents.reconciler"):
+        rec._apply(decision, [a, b], "Location")
+    contradiction_lines = [r for r in caplog.records if "contradiction" in r.getMessage()]
+    assert len(contradiction_lines) == 2  # one per conflict, never collapsed to one
+    joined = " ".join(r.getMessage() for r in contradiction_lines)
+    assert "rulers differ" in joined and "seasons differ" in joined
 
 
 def test_apply_logs_possible_duplicate_with_review_prefix_without_merging(caplog):

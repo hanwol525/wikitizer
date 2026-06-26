@@ -58,11 +58,17 @@ For each event, extract:
   - world: shaped the whole world or its major powers (the founding or fall of an empire, a world-spanning cataclysm).
   - regional: affects one region, nation, or a few groups (a war between two countries, the founding of a city).
   - personal: about a single person, family, or small group (a noble's death, one family's downfall).
+- date_text: an optional in-world date for the event, copied EXACTLY as the text states it (see "Capturing date_text" below); null or omitted if no date is stated.
 - quotes: a list of the exact verbatim quotes from the messages that support this event. Each quote is an object with the quote text and the id of the message it came from.
 
 For each quote object, provide:
 - quote: the EXACT, VERBATIM text from the message. Copy it character-for-character. Do NOT paraphrase, shorten, fix typos, or change punctuation. It must appear word-for-word in the message.
 - source_id: the integer id of the message you took the quote from.
+
+Capturing date_text:
+Each event may optionally include a "date_text" field. If the event's text states an explicit in-world date or year -- for example "342 AR", "in the Third Age", "the year 1247", or "Second Age, year 88" -- copy that date string EXACTLY as it appears in the text into "date_text". Copy the words verbatim: do NOT convert it to a number, do NOT normalize the format, and do NOT guess a date that isn't stated. If the event has no explicitly stated date, omit "date_text" or set it to null. Most events have no stated date, and that is expected and fine.
+
+Important: "date_text" is ONLY for a date the text literally states. A relative phrase like "after the old kingdoms collapsed" or "before the Empire fell" is NOT a date -- leave those inside the description as usual and set "date_text" to null. And "date_text" is NOT an ordering: continue to NEVER output any "chronological_position" or position number. Placing events on a timeline is a separate later step.
 
 Hard rules:
 - Do NOT invent events, descriptions, or quotes. Every event must be supported by at least one real quote from a real message.
@@ -73,15 +79,15 @@ Hard rules:
 INPUT: a JSON array of messages, each an object with an integer "id" and a string "content".
 
 OUTPUT: ONLY a JSON array, one object per event, of the form:
-{"name": "<string>", "aliases": ["<string>", ...], "description": "<string>", "scope": "<world|regional|personal>", "quotes": [{"quote": "<string>", "source_id": <integer>}, ...]}
+{"name": "<string>", "aliases": ["<string>", ...], "description": "<string>", "scope": "<world|regional|personal>", "date_text": "<string or null>", "quotes": [{"quote": "<string>", "source_id": <integer>}, ...]}
 If you find no events, return an empty array []. Do not output any text outside the JSON array, and do not wrap it in markdown code fences.
 
 EXAMPLE
 Input:
-[{"id": 0, "content": "The Krieger Imperium was founded after the old kingdoms collapsed"}, {"id": 1, "content": "Maltraav and Kriega fought a brutal war"}, {"id": 2, "content": "that war happened before the Empire fell"}, {"id": 3, "content": "what's everyone rolling for initiative"}, {"id": 4, "content": "The Aldward family rose to prominence around then too"}, {"id": 5, "content": "everyone just calls it the Border War"}]
+[{"id": 0, "content": "The Krieger Imperium was founded after the old kingdoms collapsed"}, {"id": 1, "content": "Maltraav and Kriega fought a brutal war"}, {"id": 2, "content": "that war happened before the Empire fell"}, {"id": 3, "content": "what's everyone rolling for initiative"}, {"id": 4, "content": "The Aldward family rose to prominence around then too"}, {"id": 5, "content": "everyone just calls it the Border War"}, {"id": 6, "content": "the Sundering of 342 AR shattered the continent"}]
 Output:
-[{"name": "Founding of the Krieger Imperium", "aliases": [], "description": "The Krieger Imperium was founded after the old kingdoms collapsed.", "scope": "world", "quotes": [{"quote": "The Krieger Imperium was founded after the old kingdoms collapsed", "source_id": 0}]}, {"name": "The Maltraav-Kriega War", "aliases": ["the Border War"], "description": "A brutal war fought between Maltraav and Kriega, which took place before the Empire fell.", "scope": "regional", "quotes": [{"quote": "Maltraav and Kriega fought a brutal war", "source_id": 1}, {"quote": "that war happened before the Empire fell", "source_id": 2}]}, {"name": "Rise of the Aldward Family", "aliases": [], "description": "The Aldward family rose to prominence.", "scope": "personal", "quotes": [{"quote": "The Aldward family rose to prominence", "source_id": 4}]}]
-(Notes on the example: there is NO position/ordering number anywhere — ordering like "after the old kingdoms collapsed" and "before the Empire fell" lives inside the description sentences. Message 3 produced nothing — it's game mechanics, not a world event. The war pulled two quotes, from messages 1 and 2.)"""
+[{"name": "Founding of the Krieger Imperium", "aliases": [], "description": "The Krieger Imperium was founded after the old kingdoms collapsed.", "scope": "world", "date_text": null, "quotes": [{"quote": "The Krieger Imperium was founded after the old kingdoms collapsed", "source_id": 0}]}, {"name": "The Maltraav-Kriega War", "aliases": ["the Border War"], "description": "A brutal war fought between Maltraav and Kriega, which took place before the Empire fell.", "scope": "regional", "date_text": null, "quotes": [{"quote": "Maltraav and Kriega fought a brutal war", "source_id": 1}, {"quote": "that war happened before the Empire fell", "source_id": 2}]}, {"name": "Rise of the Aldward Family", "aliases": [], "description": "The Aldward family rose to prominence.", "scope": "personal", "date_text": null, "quotes": [{"quote": "The Aldward family rose to prominence", "source_id": 4}]}, {"name": "The Sundering", "aliases": [], "description": "A cataclysm that shattered the continent, occurring in 342 AR.", "scope": "world", "date_text": "342 AR", "quotes": [{"quote": "the Sundering of 342 AR", "source_id": 6}]}]
+(Notes on the example: there is NO position/ordering number anywhere — ordering like "after the old kingdoms collapsed" and "before the Empire fell" lives inside the description sentences. Message 3 produced nothing — it's game mechanics, not a world event. The war pulled two quotes, from messages 1 and 2. The first three events have date_text: null because "after the old kingdoms collapsed" / "before the Empire fell" are relative references, not stated dates; only the Sundering states an actual date (342 AR), so only it fills date_text.)"""
 
 
 class HistoryExtractor(BaseExtractor):
@@ -142,6 +148,14 @@ class HistoryExtractor(BaseExtractor):
             )
             scope = "world"
 
+        # 4b. date_text -- capture the stated date VERBATIM if the event has one,
+        # else None. Purely captured here; the 4.1b timeline pass is what will
+        # interpret it into an ordering. Defensive: a non-string or blank value is
+        # treated as "no date stated". We .strip() surrounding whitespace (same as
+        # name/scope) but never touch the date's actual content -- no normalizing.
+        raw_date = raw.get("date_text")
+        date_text = raw_date.strip() if isinstance(raw_date, str) and raw_date.strip() else None
+
         # 5. supporting_quotes -- loop the FLAT quotes list (the structural
         # difference from Locations/Characters: no per-detail text).
         raw_quotes = raw.get("quotes", [])
@@ -182,6 +196,7 @@ class HistoryExtractor(BaseExtractor):
                 aliases=aliases,
                 description=description,
                 scope=scope,
+                date_text=date_text,
                 supporting_quotes=quotes_out,
             )
         except ValidationError as exc:

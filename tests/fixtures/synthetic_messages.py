@@ -49,7 +49,11 @@ CASES = [
             "Oh the Dagger Swamp had its own messy history way before the Imperium ever showed up. There was a feud between the upper and lower marsh tribes — something like 30 years of it — over who controlled the salt flats. It only really settled when the two biggest tribes intermarried. Pretty contained though; nobody outside the swamp paid it much mind.",
         ),
         expect={
-            "history": {"min_count": 1, "scope": "regional"},
+            # date_is_none: its "30 years of it" (a duration) and "before the
+            # Imperium" (relative) are near-miss phrasings that are NOT stated dates,
+            # so date_text must stay None -- the live negative for intent #2, at zero
+            # extra API cost (this case already runs the history extractor).
+            "history": {"min_count": 1, "scope": "regional", "date_is_none": True},
         },
     ),
     # 18. Individual vs collective: "Sludge" (a named person) -> Character; "the
@@ -93,6 +97,21 @@ CASES = [
         ),
         expect={
             "characters": {"expect": ["Ryan"]},
+        },
+    ),
+    # 21. History with an EXPLICIT stated in-world date -> the date_text case. The
+    # event states "342 AR", a literal date (not a relative clue like #17's "before
+    # the Imperium"), so the extractor must promote it into date_text verbatim. The
+    # `date_substring` check is loose ("342") since the rest of the event wording is
+    # model-generated -- same philosophy as the scope/name substring checks.
+    Case(
+        id="hist_dated",
+        message=_msg(
+            "dm",
+            "The Sundering tore the continent apart back in 342 AR, long before any of your characters were born.",
+        ),
+        expect={
+            "history": {"min_count": 1, "date_substring": "342"},
         },
     ),
 ]

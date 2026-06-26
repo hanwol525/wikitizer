@@ -43,6 +43,10 @@ class Case:
         bucket" boundary guard).
       * ``"scope": "world"|"regional"|"personal"`` -- History only; some returned
         event must carry that scope.
+      * ``"date_substring": "X"``  -- History only; some returned event's
+        ``date_text`` must contain X (a loose substring of the verbatim date).
+      * ``"date_is_none": True``   -- History only; EVERY returned event must have
+        ``date_text is None`` (the relative-clue / dateless negative).
       * ``"empty": True``          -- the extractor must return [].
       * ``"min_count": N``         -- at least N entities returned.
 

@@ -38,6 +38,12 @@ class HistoryEvent(BaseModel):
     aliases: list[str] = Field(default_factory=list)
     description: str
     scope: Scope
+    # The date EXACTLY as the campaign stated it ("342 AR", "the Third Age",
+    # "year 1247"), or None when no date is stated. The extractor captures this
+    # verbatim -- it does NOT normalize, parse, or convert it to a number. The
+    # 4.1b timeline pass is what interprets it into ordering. (Most campaigns
+    # state no dates, so this is None on most events -- that's expected.)
+    date_text: Optional[str] = None
     # The extractor never sets this -- a later timeline pass (which sees every
     # event at once) fills it, and the renderer (4.4) reads it to decide the
     # "Could Not Place" pile. The field stays as that mailbox even though
