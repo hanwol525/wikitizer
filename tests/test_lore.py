@@ -92,6 +92,17 @@ def test_history_event_scope_string_coerces_to_enum_member():
     assert event.scope is Scope.PERSONAL
 
 
+def test_history_event_date_text_defaults_none():
+    event = HistoryEvent(name="x", description="y", scope="world")
+    assert event.date_text is None
+
+
+def test_history_event_date_text_round_trips():
+    event = HistoryEvent(name="The Sundering", description="A cataclysm.",
+                         scope="world", date_text="342 AR")
+    assert event.date_text == "342 AR"
+
+
 def test_history_event_requires_name():
     # name is now a required field (no default) -> omitting it must raise, so a
     # regression that gave it a default wouldn't slip past.

@@ -167,6 +167,24 @@ def _apply_expectations(extractor_name, case_id, exp, result):
             f"{exp['scope']!r}; got scopes {scopes}"
         )
 
+    if "date_substring" in exp:
+        needle = exp["date_substring"]
+        dated = [e.date_text for e in result if e.date_text and needle in e.date_text]
+        assert dated, (
+            f"[{case_id}/{extractor_name}] expected a history event whose date_text "
+            f"contains {needle!r}; got date_texts "
+            f"{[(e.name, e.date_text) for e in result]}"
+        )
+
+    if exp.get("date_is_none"):
+        # The negative direction of intent #2: a relative clue / duration is NOT a
+        # date, so no returned event may populate date_text.
+        offenders = [(e.name, e.date_text) for e in result if e.date_text is not None]
+        assert not offenders, (
+            f"[{case_id}/{extractor_name}] expected every event's date_text to be None "
+            f"(no explicit date stated); got dated events {offenders}"
+        )
+
     if exp.get("empty"):
         assert result == [], (
             f"[{case_id}/{extractor_name}] expected nothing extracted; got {names}"

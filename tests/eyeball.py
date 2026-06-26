@@ -46,6 +46,7 @@ def format_entities(entities, title):
             pos_str = "(unplaced)" if pos is None else str(pos)
             # .value dodges the str(Enum) quirk in 3.9 (str(Scope.WORLD) -> "Scope.WORLD")
             out.append(f"   scope: {e.scope.value}     position: {pos_str}\n")
+            out.append(f"   date: {e.date_text or '—'}\n")
             out.append("   description:\n")
             out.append(_wrap(e.description, "     ") + "\n")
         else:  # Location / Character / Organization / Item / PeopleAndCultures all carry `details`

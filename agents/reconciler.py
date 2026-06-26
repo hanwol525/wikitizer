@@ -121,6 +121,25 @@ def _resolve_scope(scopes):
     return max(scopes, key=lambda s: order[s])
 
 
+def _resolve_date_text(members):
+    """date_text for a merged HistoryEvent. A stated date beats None (None just
+    means that particular mention didn't give one -- absence of evidence, same
+    logic as is_pc/player_name). If two merged events state DIFFERENT dates,
+    that's a contradiction in the source: we keep the first stated one and log it
+    quietly. The dropped date is removed from the `date_text` field; the merged
+    event's concatenated description and unioned quotes may or may not still
+    mention it, so the clash is logged for traceability. Returns the date string,
+    or None."""
+    dates = _dedup_preserve_order(
+        [m.date_text.strip() for m in members if m.date_text and m.date_text.strip()]
+    )
+    if not dates:
+        return None
+    if len(dates) > 1:
+        logger.debug("Reconciler: date_text clash %s -> kept first.", dates)
+    return dates[0]
+
+
 class _VetoMerge(Exception):
     """Raised by the combiner when a proposed merge turns out to be unsafe to
     actually merge (right now: two Characters with two DIFFERENT real player_names
@@ -242,6 +261,7 @@ def _combine_group(members, canonical):
             aliases=aliases,
             description=description,
             scope=_resolve_scope(scopes),
+            date_text=_resolve_date_text(members),
             chronological_position=None,  # always None until the 4.1b timeline pass
             supporting_quotes=quotes,
         )
@@ -505,6 +525,7 @@ class Reconciler(BaseAgent):
                 continue
 
             # merge stuck -> log any detail conflicts (rich + findable); keep BOTH sides.
+            for c in group.conflicts:
                 logger.warning("%s Reconciler[%s] contradiction in '%s': %r (%s) vs %r (%s) -- %s",
                                REVIEW_PREFIX, label, merged_entry.name,
                                c.detail_a, c.source_a, c.detail_b, c.source_b, c.note)
