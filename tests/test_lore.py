@@ -103,6 +103,17 @@ def test_history_event_date_text_round_trips():
     assert event.date_text == "342 AR"
 
 
+def test_history_event_calendar_system_defaults_none():
+    event = HistoryEvent(name="x", description="y", scope="world")
+    assert event.calendar_system is None
+
+
+def test_history_event_calendar_system_round_trips():
+    event = HistoryEvent(name="The Sundering", description="A cataclysm.",
+                         scope="world", calendar_system="AR years")
+    assert event.calendar_system == "AR years"
+
+
 def test_history_event_requires_name():
     # name is now a required field (no default) -> omitting it must raise, so a
     # regression that gave it a default wouldn't slip past.

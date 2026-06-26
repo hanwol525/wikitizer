@@ -44,6 +44,14 @@ class HistoryEvent(BaseModel):
     # 4.1b timeline pass is what interprets it into ordering. (Most campaigns
     # state no dates, so this is None on most events -- that's expected.)
     date_text: Optional[str] = None
+    # Which calendar system this event's date belongs to ("AR years", "Elder
+    # Scrolls eras", "Hebrew calendar", ...), or None. Like chronological_position,
+    # the EXTRACTOR never sets this -- the 4.1b timeline pass derives it (it needs
+    # the whole-timeline view to assign a CONSISTENT label across events, and to
+    # recognize that two different notations -- e.g. "1347" and "Third Era 347" --
+    # are the same system), and the renderer (4.4) groups events into one timeline
+    # per system. None until 4.1b fills it.
+    calendar_system: Optional[str] = None
     # The extractor never sets this -- a later timeline pass (which sees every
     # event at once) fills it, and the renderer (4.4) reads it to decide the
     # "Could Not Place" pile. The field stays as that mailbox even though
