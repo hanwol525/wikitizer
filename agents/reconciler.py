@@ -262,6 +262,7 @@ def _combine_group(members, canonical):
             description=description,
             scope=_resolve_scope(scopes),
             date_text=_resolve_date_text(members),
+            calendar_system=None,         # 4.1b fills this; None at merge time (like chronological_position)
             chronological_position=None,  # always None until the 4.1b timeline pass
             supporting_quotes=quotes,
         )

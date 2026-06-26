@@ -85,6 +85,7 @@ def test_history_merge_concatenates_descriptions_and_takes_broadest_scope():
     assert "The dynasty collapsed." in merged.description
     assert merged.scope == Scope.WORLD
     assert merged.chronological_position is None  # untouched until 4.1b
+    assert merged.calendar_system is None         # also a 4.1b field; merge leaves it None
 
 
 # --- History merge carries date_text forward --------------------------------
