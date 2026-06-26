@@ -103,7 +103,7 @@ def test_history_merge_date_clash_keeps_first():
     b = HistoryEvent(name="E2", description="The Empire fell.", scope="world",
                      date_text="343 AR")  # a different stated date
     merged = _combine_group([a, b], "E1")
-    assert merged.date_text == "342 AR"  # keeps first; the other survives in quotes/description
+    assert merged.date_text == "342 AR"  # keeps first stated date; the other is dropped from date_text
 
 
 def test_resolve_date_text_all_none_is_none():
@@ -125,10 +125,11 @@ def test_history_merge_date_picks_stated_when_first_is_none():
 
 
 def test_history_merge_date_clash_logs_at_debug_not_review(caplog):
-    # A date clash is a QUIET auto-resolution: it must log at DEBUG and must NOT
-    # carry the [REVIEW] prefix. [REVIEW] is reserved for the human review queue;
-    # a clash is non-destructive (the losing date survives in the quotes), so
-    # escalating it to a loud flag would wrongly pollute Phase 5.3's review.txt.
+    # A date clash is a QUIET auto-resolution (like is_pc/scope): it must log at
+    # DEBUG and must NOT carry the [REVIEW] prefix. [REVIEW] is reserved for the
+    # human review queue; a clash is auto-resolved by keeping the first stated
+    # date, so escalating it to a loud flag would wrongly pollute Phase 5.3's
+    # review.txt.
     a = HistoryEvent(name="E1", description="x", scope="world", date_text="342 AR")
     b = HistoryEvent(name="E2", description="y", scope="world", date_text="343 AR")
     with caplog.at_level(logging.DEBUG, logger="agents.reconciler"):

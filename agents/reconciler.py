@@ -126,8 +126,10 @@ def _resolve_date_text(members):
     means that particular mention didn't give one -- absence of evidence, same
     logic as is_pc/player_name). If two merged events state DIFFERENT dates,
     that's a contradiction in the source: we keep the first stated one and log it
-    quietly -- nothing is lost, because the other date still lives verbatim in the
-    merged event's description and quotes. Returns the date string, or None."""
+    quietly. The dropped date is removed from the `date_text` field; the merged
+    event's concatenated description and unioned quotes may or may not still
+    mention it, so the clash is logged for traceability. Returns the date string,
+    or None."""
     dates = _dedup_preserve_order(
         [m.date_text.strip() for m in members if m.date_text and m.date_text.strip()]
     )
