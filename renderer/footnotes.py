@@ -89,10 +89,9 @@ class FootnoteRegistry:
         The text is run through ``_normalize_quote_text`` (whitespace-collapse) for
         the key so whitespace-only differences -- internal newlines/tabs/repeated
         spaces, plus stray edge spaces -- can't split one quote into multiple
-        footnotes. ``add`` does NOT reject empty text -- it can't reach here (the
-        upstream verbatim check requires a non-empty match), and since this returns
-        a plain ``int`` it has no graceful "no footnote" value to return anyway.
-        The tripwire test pins that assumption.
+        footnotes. ``add`` deliberately does NOT reject empty/whitespace-only text;
+        after normalization it may become ``""`` and will still be assigned a
+        number (see the "empty text tripwire" test that pins this behavior).
         """
         key_text = _normalize_quote_text(quote.text)
         key = (key_text, quote.speaker, quote.source_file)
