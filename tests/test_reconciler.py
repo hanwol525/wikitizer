@@ -563,7 +563,7 @@ def test_parts_guard_partial_overlap_passes():
 
 
 def test_parts_guard_fully_unmoored_numeric_fails():
-    assert _sanity_guard_parts([4, 200], "year 342") is False      # shares no digit with 342
+    assert _sanity_guard_parts([4, 200], "year 342") is False      # shares none of the stated numbers (342)
 
 
 def test_parts_guard_none_date_text_is_trusted():
