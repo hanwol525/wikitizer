@@ -365,14 +365,14 @@ def _sanity_guard_parts(parts, date_text) -> bool:
 
     Pure Python can't fully verify a WORD-based date ("the Third Age" -> era 3)
     without parsing calendar notation (the era arithmetic we deliberately skip), so:
-      - date_text has NO digits -> can't verify -> trust the LLM's local read (True).
-      - date_text HAS digits -> at least one parts number must match one of them
-        (the tuple is anchored to a real stated number). Zero overlap means the
-        parts are unmoored from the date's actual digits -> reject (False).
+      - date_text has NO numbers -> can't verify -> trust the LLM's local read (True).
+      - date_text HAS numbers -> at least one parts value must match one of the
+        extracted numeric tokens (the tuple is anchored to a real stated number).
+        Zero overlap means the parts are unmoored from the date_text -> reject (False).
     This catches the clear numeric mismatch (e.g. [343] for "342 AR", or a tuple
-    sharing none of the date's digits). A near-miss that still shares a digit slips
+    sharing none of the date_text's numbers). A near-miss that still shares a number slips
     through, but the verbatim date renders anyway, so the worst case is a minor
-    mis-sort, never lost or fabricated lore."""
+    mis-sort, never lost or fabricated lore.
     digits = {int(n) for n in re.findall(r"\d+", date_text or "")}
     if not digits:
         return True
