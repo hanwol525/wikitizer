@@ -64,13 +64,16 @@ class FootnoteRegistry:
         an equal quote returns that SAME number. Callers can't tell a fresh mint
         from a repeat, and shouldn't need to.
 
-        The text is ``.strip()``-ed for the key so a stray trailing space can't
-        split one quote into two footnotes. ``add`` does NOT reject empty text --
-        it can't reach here (the upstream verbatim check requires a non-empty
-        match), and since this returns a plain ``int`` it has no graceful "no
-        footnote" value to return anyway. The tripwire test pins that assumption.
+        The text is normalized with ``" ".join(text.split())`` for the key so
+        whitespace-only differences (newlines/tabs/multiple spaces, plus stray edge
+        spaces) can't split one quote into multiple footnotes. ``add`` does NOT
+        reject empty text -- it can't reach here (the upstream verbatim check
+        requires a non-empty match), and since this returns a plain ``int`` it has
+        no graceful "no footnote" value to return anyway. The tripwire test pins
+        that assumption.
         """
-        key = (quote.text.strip(), quote.speaker, quote.source_file)
+        key_text = " ".join(quote.text.split())
+        key = (key_text, quote.speaker, quote.source_file)
         existing = self._numbers.get(key)
         if existing is not None:
             return existing
