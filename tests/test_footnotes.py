@@ -35,8 +35,9 @@ def test_dedup_returns_same_number_and_does_not_burn_one():
 
 
 # 3 --------------------------------------------------------------------------
-def test_strip_dedups_whitespace_twins():
-    # A stray trailing space must not split one quote into two footnotes.
+def test_edge_space_does_not_split_a_footnote():
+    # A stray trailing space must not split one quote into two footnotes. (The
+    # INTERNAL-whitespace twin case -- newline vs space -- is #17.)
     reg = FootnoteRegistry()
     assert reg.add(q("the city fell")) == 1
     assert reg.add(q("the city fell ")) == 1
@@ -196,3 +197,37 @@ def test_definition_lines_are_in_insertion_order_not_sorted():
     reg.add(q("apple"))
     rendered = reg.render_definitions()
     assert rendered.index("[^1]: `zebra`") < rendered.index("[^2]: `apple`")
+
+
+# 17 -------------------------------------------------------------------------
+def test_internal_whitespace_twins_dedup_to_one_footnote():
+    # THE regression guard for the normalization fix (and the _normalize_quote_text
+    # refactor): two quotes differing ONLY by internal whitespace -- a newline vs a
+    # space -- must collapse to ONE footnote. The pre-fix .strip()-only key split
+    # these into [^1] and [^2] yet rendered them identically (the exact
+    # duplicate-looking-footnote bug). This FAILS on a .strip()-only key and passes
+    # on the whitespace-collapse key, so it pins the fix instead of decorating it.
+    reg = FootnoteRegistry()
+    assert reg.add(q("line one\nline two")) == 1
+    assert reg.add(q("line one line two")) == 1   # same key after collapse
+    assert reg.add(q("a distinct fact")) == 2     # and it didn't burn a number
+
+
+# 18 -------------------------------------------------------------------------
+def test_normalization_touches_only_whitespace_not_case_or_punctuation():
+    # Companion guard to #17. _normalize_quote_text is now the SINGLE point where
+    # quote text is mutated (and render trusts the stored text), so it must touch
+    # ONLY whitespace -- never case or punctuation -- or it would silently corrupt
+    # the verbatim footnote this whole component exists to preserve. #17 pins the
+    # whitespace dimension; this pins the content dimension. A normalizer that
+    # collapses whitespace correctly but ALSO lowercases or drops punctuation
+    # (e.g. " ".join(t.lower().split())) passes #1-#17 -- every quote there is
+    # already lowercase and punctuation-free -- but FAILS here.
+    reg = FootnoteRegistry()
+    reg.add(q("The City FELL! it did."))
+    # rendered verbatim: case + the "!" survive inside the code span
+    assert "`The City FELL! it did.`" in reg.render_definitions()
+    # and case is part of the dedup key (matches the extractor's "case is a real
+    # change" stance): two case-different quotes are two footnotes, not one.
+    assert reg.add(q("Gol")) == 2
+    assert reg.add(q("gol")) == 3
