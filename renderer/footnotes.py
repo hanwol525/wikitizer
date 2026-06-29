@@ -28,6 +28,25 @@ from models.lore import Quote
 FOOTNOTES_HEADING = "## Footnotes"
 
 
+def _normalize_quote_text(text: str) -> str:
+    """Collapse every run of whitespace -- newlines, tabs, repeated spaces, plus
+    stray leading/trailing spaces -- down to single spaces.
+
+    This is THE one normalization for quote text. It is applied exactly once, at
+    the ``add`` boundary, so the dedup key and the rendered text are derived from
+    the same single-line form and can never drift apart.
+
+    History (so nobody re-splits it): an earlier version applied two DIFFERENT
+    normalizations -- ``add`` used ``text.strip()`` (edges only) while rendering
+    flattened with ``" ".join(text.split())`` (everything). Two quotes differing
+    only by INTERNAL whitespace (a newline vs a space) therefore got two different
+    footnote numbers yet rendered to the identical line: duplicate-looking
+    footnotes, the exact thing "deduplicated" is supposed to prevent. One shared
+    normalizer at one boundary makes that whole class of bug unrepresentable.
+    """
+    return " ".join(text.split())
+
+
 class FootnoteRegistry:
     """Mints stable, deduplicated ``[^N]`` footnote numbers for ``Quote`` objects
     and renders their definitions block.
@@ -37,13 +56,16 @@ class FootnoteRegistry:
 
     def __init__(self) -> None:
         # Key: the (text, speaker, source_file) triple the reconciler dedups on
-        # (agents/reconciler.py `_dedup_quotes`), EXCEPT we additionally .strip()
-        # the text here -- a stray trailing space must not split one footnote in
-        # two, while the reconciler keys on RAW text. So it's the same field
-        # SHAPE with a stricter text match, NOT the byte-identical key (an earlier
-        # comment here wrongly claimed they matched outright). We key on the VALUES,
-        # not the Quote object, so two DISTINCT Quote instances with equal fields
-        # collapse to a single footnote. Value: just the assigned int.
+        # (agents/reconciler.py `_dedup_quotes`), EXCEPT the text is first run
+        # through `_normalize_quote_text` (whitespace-collapse). The reconciler
+        # keys on RAW text, so this is the same field SHAPE with a stricter text
+        # match, NOT a byte-identical key. We key on the VALUES, not the Quote
+        # object, so two DISTINCT Quote instances with equal fields collapse to a
+        # single footnote. Value: just the assigned int.
+        #
+        # `add` is the ONLY writer here and it always normalizes before storing,
+        # so every key's text is guaranteed already single-line -- which is why
+        # render_definitions can trust the stored text and never re-flattens it.
         #
         # dict insertion order is a language guarantee on Python 3.7+ (we're on
         # 3.9), and we assign numbers in insert order, so iterating this dict to
@@ -59,20 +81,19 @@ class FootnoteRegistry:
     def add(self, quote: Quote) -> int:
         """Register ``quote`` and return its footnote number.
 
-        Idempotent per distinct ``(stripped_text, speaker, source_file)``: the
+        Idempotent per distinct ``(normalized_text, speaker, source_file)``: the
         first add of a given quote assigns it the next number; every later add of
         an equal quote returns that SAME number. Callers can't tell a fresh mint
         from a repeat, and shouldn't need to.
 
-        The text is normalized with ``" ".join(text.split())`` for the key so
-        whitespace-only differences (newlines/tabs/multiple spaces, plus stray edge
-        spaces) can't split one quote into multiple footnotes. ``add`` does NOT
-        reject empty text -- it can't reach here (the upstream verbatim check
-        requires a non-empty match), and since this returns a plain ``int`` it has
-        no graceful "no footnote" value to return anyway. The tripwire test pins
-        that assumption.
+        The text is run through ``_normalize_quote_text`` (whitespace-collapse) for
+        the key so whitespace-only differences -- internal newlines/tabs/repeated
+        spaces, plus stray edge spaces -- can't split one quote into multiple
+        footnotes. ``add`` deliberately does NOT reject empty/whitespace-only text;
+        after normalization it may become ``""`` and will still be assigned a
+        number (see the "empty text tripwire" test that pins this behavior).
         """
-        key_text = " ".join(quote.text.split())
+        key_text = _normalize_quote_text(quote.text)
         key = (key_text, quote.speaker, quote.source_file)
         existing = self._numbers.get(key)
         if existing is not None:
@@ -97,19 +118,19 @@ class FootnoteRegistry:
             return ""
         lines = [FOOTNOTES_HEADING, ""]
         for (text, speaker, source_file), number in self._numbers.items():
-            # Flatten the quote to a single line FIRST: a markdown footnote
-            # definition is line-based, so any newline inside the text would split
-            # one definition into two. ``" ".join(text.split())`` collapses every
-            # run of whitespace (newlines, tabs, double spaces) to a single space.
-            flat = " ".join(text.split())
-            # Then wrap the verbatim text in a code span (backticks) so markdown
-            # renders it LITERALLY. This is the load-bearing fidelity choice: D&D
-            # roleplay is full of asterisks (``*draws his sword*``), and outside a
-            # code span markdown eats those as emphasis -- so the reader would see
-            # different characters in the footnote than are in the actual chat log,
-            # in a tool whose entire pitch is "go check the source yourself." A
-            # code span neutralizes asterisks, underscores, brackets, etc. all at
-            # once, with no escape table to maintain.
+            # `text` is already single-line: `add` ran it through
+            # _normalize_quote_text before it ever became a key, and `add` is the
+            # only writer, so there's nothing to flatten here -- we render the
+            # stored text directly.
+            #
+            # Wrap the verbatim text in a code span (backticks) so markdown renders
+            # it LITERALLY. This is the load-bearing fidelity choice: D&D roleplay
+            # is full of asterisks (``*draws his sword*``), and outside a code span
+            # markdown eats those as emphasis -- so the reader would see different
+            # characters in the footnote than are in the actual chat log, in a tool
+            # whose entire pitch is "go check the source yourself." A code span
+            # neutralizes asterisks, underscores, brackets, etc. all at once, with
+            # no escape table to maintain.
             #
             # The one char a code span CAN'T ignore is the backtick itself: a span
             # is only escape-free when its FENCE outruns the longest backtick run
@@ -123,8 +144,8 @@ class FootnoteRegistry:
             # one trailing space inside a span, so the pad is invisible) to stop
             # that edge backtick fusing with the fence. Zero inner backticks => a
             # single-backtick fence and a no-op pad, byte-identical to before.
-            runs = re.findall("`+", flat)
+            runs = re.findall("`+", text)
             fence = "`" * (max((len(r) for r in runs), default=0) + 1)
-            inner = f" {flat} " if (flat.startswith("`") or flat.endswith("`")) else flat
+            inner = f" {text} " if (text.startswith("`") or text.endswith("`")) else text
             lines.append(f"[^{number}]: {fence}{inner}{fence} — {speaker}, {source_file}")
         return "\n".join(lines)
