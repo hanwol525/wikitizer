@@ -18,11 +18,16 @@ import pytest
 from pydantic import ValidationError
 
 from models.lore import Location, Character, HistoryEvent, Quote, Scope
-from models.reconcile import ReconcileDecision, MergeGroup, DetailConflict, PossibleDuplicate
+from models.reconcile import (
+    ReconcileDecision, MergeGroup, DetailConflict, PossibleDuplicate,
+    DateDecision, DatedEvent, PlacementDecision, GapPlacement,
+)
 from agents.reconciler import (
     Reconciler, _combine_group, _resolve_scope, _resolve_player_name,
     _short_name_veto, _validate_decision, _dedup_quotes, _VetoMerge,
     _resolve_canonical, _extract_json_object, REVIEW_PREFIX, _resolve_date_text,
+    _sanity_guard_parts, _validate_date_decision, _build_spine_and_gaps,
+    _validate_placement_decision, _weave_and_stamp, UNDATED,
 )
 
 
@@ -33,6 +38,11 @@ def q(text, speaker="dm", source="dndgroup.txt"):
 def loc(name, aliases=None, details=None, quotes=None):
     return Location(name=name, aliases=aliases or [], details=details or [],
                     supporting_quotes=quotes or [])
+
+
+def hev(name, scope="world", date_text=None):
+    return HistoryEvent(name=name, description=f"{name} happened.", scope=scope,
+                        date_text=date_text)
 
 
 # --- combine: aliases ------------------------------------------------------
@@ -525,3 +535,256 @@ def test_dedup_quotes_keeps_distinct_source_files():
     out = _dedup_quotes(quotes)
     assert len(out) == 2
     assert {x.source_file for x in out} == {"a.txt", "b.txt"}
+
+
+# ===========================================================================
+# Phase 4.1b -- the pure-Python timeline engine (no network). The spine/gaps,
+# the parts guard, the two structural validators, and the weave/stamp. This is
+# the deterministic core, so it is over-covered on purpose.
+# ===========================================================================
+
+
+# --- 3a. the parts guard ----------------------------------------------------
+def test_parts_guard_numeric_match_passes():
+    assert _sanity_guard_parts([342], "342 AR") is True
+
+
+def test_parts_guard_numeric_mismatch_fails():
+    assert _sanity_guard_parts([343], "342 AR") is False          # clear transcription error
+
+
+def test_parts_guard_word_only_date_is_trusted():
+    assert _sanity_guard_parts([3], "the Third Age") is True       # no digits -> can't verify -> trust
+
+
+def test_parts_guard_partial_overlap_passes():
+    assert _sanity_guard_parts([4, 200], "4th Era 200") is True
+    assert _sanity_guard_parts([4, 201], "4th Era 200") is True    # 4 still grounds it -> minor slip ok
+
+
+def test_parts_guard_fully_unmoored_numeric_fails():
+    assert _sanity_guard_parts([4, 200], "year 342") is False      # shares none of the stated numbers (342)
+
+
+def test_parts_guard_none_date_text_is_trusted():
+    # an extractor could hand a None date_text through; no digits -> can't verify -> trust
+    assert _sanity_guard_parts([3], None) is True
+
+
+# --- 3b. _validate_date_decision --------------------------------------------
+def _dd(*triples):  # (index, system, parts) -> DateDecision
+    return DateDecision(dated=[DatedEvent(index=i, system=s, parts=p) for i, s, p in triples])
+
+
+def test_validate_date_rejects_out_of_range_index():
+    assert _validate_date_decision(_dd((5, "AR", [1])), [hev("A", date_text="1 AR")])
+
+
+def test_validate_date_rejects_event_without_date_text():
+    # index 0 is a real event but has no date_text -> can't extract a date from it
+    assert _validate_date_decision(_dd((0, "AR", [1])), [hev("A")])
+
+
+def test_validate_date_rejects_empty_or_nonpositive_parts():
+    assert _validate_date_decision(_dd((0, "AR", [])), [hev("A", date_text="1 AR")])
+    assert _validate_date_decision(_dd((0, "AR", [0])), [hev("A", date_text="0 AR")])
+
+
+def test_validate_date_rejects_duplicate_index():
+    evs = [hev("A", date_text="1 AR")]
+    assert _validate_date_decision(_dd((0, "AR", [1]), (0, "AR", [2])), evs)
+
+
+def test_validate_date_rejects_empty_system_label():
+    assert _validate_date_decision(_dd((0, "  ", [1])), [hev("A", date_text="1 AR")])
+
+
+def test_validate_date_passes_clean():
+    evs = [hev("A", date_text="342 AR"), hev("B", date_text="400 AR")]
+    assert _validate_date_decision(_dd((0, "AR", [342]), (1, "AR", [400])), evs) == []
+
+
+# --- 3c. _build_spine_and_gaps ----------------------------------------------
+def test_spine_sorts_within_system_and_numbers_gaps():
+    # two AR events out of order -> sorted; m=2 groups -> 3 gaps
+    spines, gaps = _build_spine_and_gaps([(0, "AR", [400]), (1, "AR", [342])])
+    assert spines["AR"] == [[1], [0]]                      # 342 (idx1) before 400 (idx0)
+    assert set(g for g in gaps if g.startswith("AR#")) == {"AR#0", "AR#1", "AR#2"}
+
+
+def test_spine_collapses_ties_into_one_rank_group():
+    # identical parts -> one rank-group -> only 2 gaps (no phantom gap between ties)
+    spines, gaps = _build_spine_and_gaps([(0, "AR", [342]), (1, "AR", [342])])
+    assert spines["AR"] == [[0, 1]]                        # both in one group
+    assert {g for g in gaps if g.startswith("AR#")} == {"AR#0", "AR#1"}
+
+
+def test_spine_tie_group_preserves_input_order():
+    # equal parts -> one group, members in the order they appeared in `dated`
+    spines, _ = _build_spine_and_gaps([(2, "AR", [342]), (5, "AR", [342])])
+    assert spines["AR"] == [[2, 5]]
+
+
+def test_spine_multi_part_tuple_sorts_era_then_year():
+    # [3, 999] sorts before [4, 1] element-by-element, with no calendar arithmetic
+    spines, _ = _build_spine_and_gaps([(0, "Eras", [4, 1]), (1, "Eras", [3, 999])])
+    assert spines["Eras"] == [[1], [0]]                    # era 3 yr 999 before era 4 yr 1
+
+
+def test_spine_always_includes_undated_pseudo_system():
+    spines, gaps = _build_spine_and_gaps([(0, "AR", [1])])
+    assert UNDATED in spines and spines[UNDATED] == []
+    assert f"{UNDATED}#0" in gaps
+
+
+def test_spine_multi_system_namespaces_gaps():
+    spines, gaps = _build_spine_and_gaps([(0, "AR", [1]), (1, "Eras", [4, 200])])
+    assert "AR#0" in gaps and "Eras#0" in gaps
+    assert gaps["AR#0"][0] == "AR" and gaps["Eras#0"][0] == "Eras"
+
+
+def test_spine_dateless_input_has_only_undated_one_gap():
+    spines, gaps = _build_spine_and_gaps([])
+    assert list(spines) == [UNDATED] and spines[UNDATED] == []
+    assert list(gaps) == [f"{UNDATED}#0"]
+
+
+# --- 3d. _weave_and_stamp (the heart of it) ---------------------------------
+def test_weave_inserts_relative_between_dated_markers():
+    # spine: Founding(0)=1300, Sundering(1)=1350; relative Aldward(2) in the middle gap
+    events = [hev("Founding", date_text="1300"), hev("Sundering", date_text="1350"),
+              hev("Aldward")]
+    spines, gaps = _build_spine_and_gaps([(0, "AR", [1300]), (1, "AR", [1350])])
+    out = _weave_and_stamp(events, spines, {"AR#1": [2]}, gaps)
+    by_name = {e.name: e for e in out}
+    assert by_name["Founding"].chronological_position == 0
+    assert by_name["Aldward"].chronological_position == 1   # woven into the gap
+    assert by_name["Sundering"].chronological_position == 2
+    assert all(by_name[n].calendar_system == "AR" for n in ("Founding", "Aldward", "Sundering"))
+
+
+def test_weave_relative_before_first_marker():
+    events = [hev("Founding", date_text="1300"), hev("Before")]
+    spines, gaps = _build_spine_and_gaps([(0, "AR", [1300])])
+    out = _weave_and_stamp(events, spines, {"AR#0": [1]}, gaps)   # gap 0 = before everything
+    by_name = {e.name: e for e in out}
+    assert by_name["Before"].chronological_position == 0
+    assert by_name["Founding"].chronological_position == 1
+
+
+def test_weave_tied_markers_then_relative_in_following_gap():
+    # two events share a date (one rank-group), a relative sits in the gap AFTER them.
+    # Tied markers get adjacent positions; the relative follows.
+    events = [hev("Founding", date_text="1300"), hev("Charter", date_text="1300"),
+              hev("After")]
+    spines, gaps = _build_spine_and_gaps([(0, "AR", [1300]), (1, "AR", [1300])])
+    assert spines["AR"] == [[0, 1]]                          # collapsed tie -> gaps AR#0, AR#1
+    out = _weave_and_stamp(events, spines, {"AR#1": [2]}, gaps)
+    by_name = {e.name: e for e in out}
+    assert by_name["Founding"].chronological_position == 0
+    assert by_name["Charter"].chronological_position == 1
+    assert by_name["After"].chronological_position == 2
+    assert by_name["After"].calendar_system == "AR"
+
+
+def test_weave_within_gap_order_is_preserved():
+    events = [hev("Sundering", date_text="1350"), hev("X"), hev("Y")]
+    spines, gaps = _build_spine_and_gaps([(0, "AR", [1350])])
+    out = _weave_and_stamp(events, spines, {"AR#0": [2, 1]}, gaps)  # Y then X, before Sundering
+    by_name = {e.name: e for e in out}
+    assert by_name["Y"].chronological_position == 0
+    assert by_name["X"].chronological_position == 1
+    assert by_name["Sundering"].chronological_position == 2
+
+
+def test_weave_unplaced_event_is_could_not_place():
+    events = [hev("Sundering", date_text="1350"), hev("Orphan")]
+    spines, gaps = _build_spine_and_gaps([(0, "AR", [1350])])
+    out = _weave_and_stamp(events, spines, {}, gaps)            # Orphan placed nowhere
+    orphan = next(e for e in out if e.name == "Orphan")
+    assert orphan.calendar_system is None and orphan.chronological_position is None
+
+
+def test_weave_dateless_campaign_all_on_none_timeline():
+    events = [hev("A"), hev("B"), hev("C")]
+    spines, gaps = _build_spine_and_gaps([])                    # no dates
+    out = _weave_and_stamp(events, spines, {f"{UNDATED}#0": [0, 1, 2]}, gaps)
+    for i, e in enumerate(out):
+        assert e.calendar_system is None                       # the None timeline, not "(undated)"
+        assert e.chronological_position == i                   # ordered 0,1,2
+
+
+def test_weave_positions_number_per_system():
+    events = [hev("A", date_text="1 AR"), hev("B", date_text="1 ES")]
+    spines, gaps = _build_spine_and_gaps([(0, "AR", [1]), (1, "ES", [1])])
+    out = _weave_and_stamp(events, spines, {}, gaps)
+    # each system's single event starts at position 0
+    assert all(e.chronological_position == 0 for e in out)
+    assert {e.calendar_system for e in out} == {"AR", "ES"}
+
+
+def test_weave_undated_events_in_mixed_campaign_get_none_system_with_positions():
+    # dated AR spine + an unanchored undated pair on the (undated) timeline
+    events = [hev("Dated", date_text="1 AR"), hev("Aldward"), hev("Borren")]
+    spines, gaps = _build_spine_and_gaps([(0, "AR", [1])])
+    out = _weave_and_stamp(events, spines, {f"{UNDATED}#0": [1, 2]}, gaps)
+    by_name = {e.name: e for e in out}
+    assert by_name["Dated"].calendar_system == "AR"
+    assert by_name["Aldward"].calendar_system is None and by_name["Aldward"].chronological_position == 0
+    assert by_name["Borren"].calendar_system is None and by_name["Borren"].chronological_position == 1
+
+
+def test_weave_unknown_gap_id_falls_to_could_not_place():
+    events = [hev("Sundering", date_text="1350"), hev("Lost")]
+    spines, gaps = _build_spine_and_gaps([(0, "AR", [1350])])
+    out = _weave_and_stamp(events, spines, {"AR#99": [1]}, gaps)  # gap 99 doesn't exist
+    lost = next(e for e in out if e.name == "Lost")
+    assert lost.chronological_position is None
+
+
+def test_weave_does_not_mutate_inputs():
+    events = [hev("A", date_text="1 AR")]
+    spines, gaps = _build_spine_and_gaps([(0, "AR", [1])])
+    _weave_and_stamp(events, spines, {}, gaps)
+    assert events[0].chronological_position is None and events[0].calendar_system is None
+
+
+# --- 3e. _validate_placement_decision ---------------------------------------
+def _setup_gaps():
+    # one AR marker -> gaps AR#0, AR#1, plus (undated)#0; dated index is {0}
+    spines, gaps = _build_spine_and_gaps([(0, "AR", [1350])])
+    return gaps
+
+
+def _pd(*pairs):  # (gap, [events]) -> PlacementDecision
+    return PlacementDecision(placements=[GapPlacement(gap=g, events=e) for g, e in pairs])
+
+
+def test_validate_placement_rejects_unknown_gap():
+    evs = [hev("M", date_text="1350"), hev("R")]
+    assert _validate_placement_decision(_pd(("AR#9", [1])), evs, {0}, _setup_gaps())
+
+
+def test_validate_placement_rejects_dated_event():
+    evs = [hev("M", date_text="1350"), hev("R")]
+    assert _validate_placement_decision(_pd(("AR#0", [0])), evs, {0}, _setup_gaps())  # 0 is dated
+
+
+def test_validate_placement_rejects_double_placement():
+    evs = [hev("M", date_text="1350"), hev("R")]
+    assert _validate_placement_decision(_pd(("AR#0", [1]), ("AR#1", [1])), evs, {0}, _setup_gaps())
+
+
+def test_validate_placement_rejects_duplicate_gap():
+    evs = [hev("M", date_text="1350"), hev("R"), hev("S")]
+    assert _validate_placement_decision(_pd(("AR#0", [1]), ("AR#0", [2])), evs, {0}, _setup_gaps())
+
+
+def test_validate_placement_rejects_out_of_range_event():
+    evs = [hev("M", date_text="1350"), hev("R")]
+    assert _validate_placement_decision(_pd(("AR#0", [9])), evs, {0}, _setup_gaps())
+
+
+def test_validate_placement_passes_clean():
+    evs = [hev("M", date_text="1350"), hev("R")]
+    assert _validate_placement_decision(_pd(("AR#0", [1])), evs, {0}, _setup_gaps()) == []
