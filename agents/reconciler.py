@@ -14,12 +14,13 @@ batching (de-dup needs the whole list at once) and no new quotes to verify.
 
 import json
 import logging
+import re
 
 from pydantic import ValidationError
 
 from agents.base import BaseAgent, ClaudeJSONError, strip_code_fences
 from models.lore import Character, HistoryEvent, Scope
-from models.reconcile import ReconcileDecision
+from models.reconcile import ReconcileDecision, DateDecision, PlacementDecision
 
 logger = logging.getLogger(__name__)
 
@@ -331,6 +332,198 @@ def _validate_decision(decision, entries):
                 f"merge {gi}: canonical {group.canonical!r} is not a name/alias of any member"
             )
     return problems
+
+
+# --------------------------------------------------------------------------- #
+# Phase 4.1b -- the pure-Python timeline engine. Runs AFTER the 4.1a merge, over
+# the deduplicated HistoryEvents, to fill `calendar_system` + `chronological_position`.
+# The model: a sorted SPINE of dated events with GAPS between them; relative
+# (undated) events get woven into the gaps. Dates sort as tuples of parts, biggest
+# unit first, so Python owns every position and the LLM never emits one. These are
+# the deterministic pieces; Brief B wires the two Claude calls on top of them.
+# --------------------------------------------------------------------------- #
+
+# The pseudo-system that holds relatively-ordered, date-LESS events. A campaign
+# with no dates at all runs entirely on this one "system" (its single gap); a
+# mixed campaign uses it for events that order among themselves but anchor to no
+# date. Events woven here get calendar_system=None (the label is internal only).
+UNDATED = "(undated)"
+
+
+def _gap_id(system: str, k: int) -> str:
+    """The ID for gap k of a system. Gap k sits immediately BEFORE rank-group k
+    (so gap 0 = before everything, gap m = after the last group). Callers match
+    these by EXACT STRING against the gap-lookup dict -- they never parse the id
+    back apart, so a system label containing a '#' or space can't break anything."""
+    return f"{system}#{k}"
+
+
+def _sanity_guard_parts(parts, date_text) -> bool:
+    """Best-effort check that a parts tuple is grounded in the event's stated date.
+    True = usable; False = looks unmoored, so the caller drops this event from the
+    dated spine (it falls back to relative placement / Could Not Place).
+
+    Pure Python can't fully verify a WORD-based date ("the Third Age" -> era 3)
+    without parsing calendar notation (the era arithmetic we deliberately skip), so:
+      - date_text has NO digits -> can't verify -> trust the LLM's local read (True).
+      - date_text HAS digits -> at least one parts number must match one of them
+        (the tuple is anchored to a real stated number). Zero overlap means the
+        parts are unmoored from the date's actual digits -> reject (False).
+    This catches the clear numeric mismatch (e.g. [343] for "342 AR", or a tuple
+    sharing none of the date's digits). A near-miss that still shares a digit slips
+    through, but the verbatim date renders anyway, so the worst case is a minor
+    mis-sort, never lost or fabricated lore."""
+    digits = {int(n) for n in re.findall(r"\d+", date_text or "")}
+    if not digits:
+        return True
+    return bool(set(parts) & digits)
+
+
+def _validate_date_decision(decision, events) -> list:
+    """Structural sanity-check on Call 1's DateDecision BEFORE the spine is built.
+    Returns a list of human-readable problems; empty list == clean. (Brief B retries
+    on any problem, like 4.1a.) This is SEPARATE from _sanity_guard_parts: validation
+    failures are structural and retry the whole call; a guard failure drops a single
+    event to relative placement without failing the call.
+
+    Checks:
+      1. every index is in range 0..len-1
+      2. the event at that index actually HAS a date_text (you can't date a date-less
+         event) -- a non-None, non-blank string
+      3. parts is a non-empty list of positive integers
+      4. no index appears twice in `dated`
+    """
+    problems = []
+    n = len(events)
+    seen = set()
+    for d in decision.dated:
+        if d.index < 0 or d.index >= n:
+            problems.append(f"dated: index {d.index} out of range 0..{n - 1}")
+            continue
+        if d.index in seen:
+            problems.append(f"dated: index {d.index} listed more than once")
+        seen.add(d.index)
+        dt = events[d.index].date_text
+        if not (isinstance(dt, str) and dt.strip()):
+            problems.append(f"dated: index {d.index} has no date_text to extract from")
+        if not d.parts or not all(isinstance(p, int) and p > 0 for p in d.parts):
+            problems.append(f"dated: index {d.index} has invalid parts {d.parts!r}")
+        if not d.system or not d.system.strip():
+            problems.append(f"dated: index {d.index} has an empty system label")
+    return problems
+
+
+def _build_spine_and_gaps(dated):
+    """Group dated events by system, tuple-sort within each, collapse ties into
+    rank-groups, and enumerate the gaps. `dated` is a list of (index, system, parts)
+    tuples that already passed _validate_date_decision AND _sanity_guard_parts.
+
+    Returns (spines, gap_lookup):
+      spines: dict[system_label, list[list[int]]] -- per system, the ordered
+              rank-groups (events with identical parts share a group, in original
+              order). ALWAYS includes the UNDATED pseudo-system (zero rank-groups ->
+              one gap) so relatively-ordered date-less events have somewhere to land.
+      gap_lookup: dict[gap_id, (system_label, k)] -- every gap ID the LLM may
+              reference, mapped to its system and insert-slot k. m rank-groups -> m+1
+              gaps. Opaque keys: match by exact string, never parse.
+    """
+    by_system = {}
+    for index, system, parts in dated:
+        by_system.setdefault(system, []).append((tuple(parts), index))
+
+    spines = {}
+    for system, items in by_system.items():
+        items.sort(key=lambda pair: pair[0])          # tuple-sort by parts
+        groups = []                                    # collapse ties into rank-groups
+        for parts_key, index in items:
+            if groups and groups[-1][0] == parts_key:
+                groups[-1][1].append(index)
+            else:
+                groups.append((parts_key, [index]))
+        spines[system] = [members for _, members in groups]
+
+    spines.setdefault(UNDATED, [])                     # always available; zero markers -> one gap
+
+    gap_lookup = {}
+    for system, rank_groups in spines.items():
+        for k in range(len(rank_groups) + 1):          # m groups -> m+1 gaps
+            gap_lookup[_gap_id(system, k)] = (system, k)
+    return spines, gap_lookup
+
+
+def _validate_placement_decision(decision, events, dated_indices, gap_lookup) -> list:
+    """Structural sanity-check on Call 2's PlacementDecision BEFORE weaving. Returns
+    a list of problems; empty == clean. (Brief B retries on any problem.)
+
+    Checks:
+      1. every `gap` is a real gap ID Python handed out (in gap_lookup)
+      2. no gap appears in more than one placement (so the gap->events dict can't
+         silently drop a collision)
+      3. every event index is in range
+      4. every placed event is a RELATIVE event -- NOT one of the dated_indices (a
+         dated event's position is Python's, not the LLM's to move)
+      5. no event index appears in more than one gap (no double-placement)
+    """
+    problems = []
+    n = len(events)
+    seen_gaps = set()
+    seen_events = set()
+    for p in decision.placements:
+        if p.gap not in gap_lookup:
+            problems.append(f"placement: unknown gap {p.gap!r}")
+        if p.gap in seen_gaps:
+            problems.append(f"placement: gap {p.gap!r} listed more than once")
+        seen_gaps.add(p.gap)
+        for idx in p.events:
+            if idx < 0 or idx >= n:
+                problems.append(f"placement: event index {idx} out of range 0..{n - 1}")
+                continue
+            if idx in dated_indices:
+                problems.append(f"placement: event {idx} is a dated event; can't be placed by gap")
+            if idx in seen_events:
+                problems.append(f"placement: event {idx} placed in more than one gap")
+            seen_events.add(idx)
+    return problems
+
+
+def _weave_and_stamp(events, spines, placements, gap_lookup):
+    """Produce the final events with calendar_system + chronological_position set.
+    Pure + deterministic; assumes `placements` already passed
+    _validate_placement_decision. `placements` is dict[gap_id, list[int]] (ordered
+    relative-event indices per gap). Walks each system's spine, drops placed
+    relatives into their gaps in order, and stamps sequential positions PER SYSTEM
+    (each timeline numbers from 0). Events placed nowhere -> Could Not Place
+    (calendar_system=None, position=None). Returns NEW event objects (model_copy);
+    never mutates the inputs."""
+    # bucket placements by system + insert-slot; skip any gap id we didn't define
+    # (a stray/invalid gap ref -> its events simply aren't placed -> Could Not Place)
+    placed = {}  # system -> {k: [event indices in order]}
+    for gap_id, idxs in placements.items():
+        if gap_id not in gap_lookup:
+            continue
+        system, k = gap_lookup[gap_id]
+        placed.setdefault(system, {})[k] = list(idxs)
+
+    updates = {}  # event index -> (calendar_system, position)
+    for system, rank_groups in spines.items():
+        cal = None if system == UNDATED else system
+        gaps = placed.get(system, {})
+        sequence = []
+        for k in range(len(rank_groups) + 1):
+            sequence.extend(gaps.get(k, []))          # relatives in gap k (before group k)
+            if k < len(rank_groups):
+                sequence.extend(rank_groups[k])       # the (possibly tied) markers at rank k
+        for position, index in enumerate(sequence):
+            updates[index] = (cal, position)
+
+    out = []
+    for i, e in enumerate(events):
+        cal, position = updates.get(i, (None, None))  # not woven anywhere -> Could Not Place
+        out.append(e.model_copy(update={
+            "calendar_system": cal,
+            "chronological_position": position,
+        }))
+    return out
 
 
 RECONCILER_SYSTEM_PROMPT = """\

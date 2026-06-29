@@ -64,3 +64,38 @@ class ReconcileDecision(BaseModel):
     """
     merges: list[MergeGroup] = Field(default_factory=list)
     possible_duplicates: list[PossibleDuplicate] = Field(default_factory=list)
+
+
+# --- Phase 4.1b: timeline-ordering decision contracts -----------------------
+# Two LLM calls feed the timeline engine. Call 1 (date extraction) returns a
+# DateDecision; Python sorts it into a spine + gaps; Call 2 (placement) returns a
+# PlacementDecision dropping the undated events into those gaps. The LLM NEVER
+# emits a position integer in either -- Python owns every chronological_position.
+
+class DatedEvent(BaseModel):
+    """One event the LLM judged to carry an explicit stated date (Call 1)."""
+    index: int          # which history event this is, by position in the list we sent
+    system: str         # the calendar system the date is in: "AR years", "Elder Scrolls eras", ...
+    parts: list[int]    # the date as a sortable tuple, biggest unit FIRST:
+                        #   [1347] for "1347", or [4, 200] for "4th Era 200".
+                        # Python tuple-sorts these, so era-then-year orders for free.
+
+
+class DateDecision(BaseModel):
+    """Call 1's whole reply. Any event NOT listed in `dated` has no usable stated
+    date -> it's a candidate for relative placement in Call 2 (or Could Not Place).
+    Implicit, like 4.1a's unlisted-means-singleton."""
+    dated: list[DatedEvent] = Field(default_factory=list)
+
+
+class GapPlacement(BaseModel):
+    """One gap and the relative events that fall into it, in order (Call 2)."""
+    gap: str            # a gap ID Python handed the LLM, e.g. "AR years#1" or "(undated)#0"
+    events: list[int]   # the relative events in this gap, EARLIEST FIRST (this list IS
+                        # the within-gap ordering; Python lays them down in this order)
+
+
+class PlacementDecision(BaseModel):
+    """Call 2's whole reply. Any relative event not placed in any gap -> Could Not
+    Place (position None). Implicit + safe, same as 4.1a's unlisted convention."""
+    placements: list[GapPlacement] = Field(default_factory=list)
