@@ -12,7 +12,9 @@ assemble path is covered with zero network; the Reconciler instance is built via
 `__new__` (skipping `__init__`/the Anthropic client, which `_apply` never needs).
 """
 
+import json
 import logging
+import re
 
 import pytest
 from pydantic import ValidationError
@@ -788,3 +790,168 @@ def test_validate_placement_rejects_out_of_range_event():
 def test_validate_placement_passes_clean():
     evs = [hev("M", date_text="1350"), hev("R")]
     assert _validate_placement_decision(_pd(("AR#0", [1])), evs, {0}, _setup_gaps()) == []
+
+
+# ===========================================================================
+# Phase 4.1b Brief B: order_history orchestration (two Claude calls, no network).
+# Drives order_history with a FakeClient returning canned Call 1 / Call 2 replies.
+# ===========================================================================
+
+def _date_json(*triples):  # (index, system, parts) -> a Call-1 reply
+    return json.dumps({"dated": [{"index": i, "system": s, "parts": p} for i, s, p in triples]})
+
+
+def _place_json(*pairs):   # (gap, [events]) -> a Call-2 reply
+    return json.dumps({"placements": [{"gap": g, "events": e} for g, e in pairs]})
+
+
+def test_order_history_empty_makes_no_calls():
+    client = FakeClient([])
+    rec = Reconciler(client=client)
+    assert rec.order_history([]) == []
+    assert client.call_count == 0
+
+
+def test_order_history_dateless_skips_call_1():
+    # nothing has a date_text -> Call 1 skipped; one Call 2 places everyone on (undated)
+    events = [hev("A"), hev("B"), hev("C")]
+    rec = make_reconciler([_place_json((f"{UNDATED}#0", [0, 1, 2]))])
+    out = rec.order_history(events)
+    assert rec.client.call_count == 1                      # only the placement call
+    for i, e in enumerate(out):
+        assert e.calendar_system is None and e.chronological_position == i
+
+
+def test_order_history_all_dated_skips_call_2():
+    # everything is dated -> nothing undated -> Call 2 skipped; one Call 1 only.
+    events = [hev("A", date_text="1 AR"), hev("B", date_text="2 AR")]
+    rec = make_reconciler([_date_json((0, "AR", [1]), (1, "AR", [2]))])
+    out = rec.order_history(events)
+    assert rec.client.call_count == 1                      # only the date call
+    by_name = {e.name: e for e in out}
+    assert (by_name["A"].calendar_system, by_name["A"].chronological_position) == ("AR", 0)
+    assert (by_name["B"].calendar_system, by_name["B"].chronological_position) == ("AR", 1)
+
+
+def test_order_history_dated_then_relative_weaves():
+    # Founding(1300) + Sundering(1350) dated; Aldward relative, between them.
+    events = [hev("Founding", date_text="1300"), hev("Sundering", date_text="1350"),
+              hev("Aldward")]
+    rec = make_reconciler([
+        _date_json((0, "AR", [1300]), (1, "AR", [1350])),  # Call 1
+        _place_json(("AR#1", [2])),                        # Call 2: Aldward in the middle gap
+    ])
+    out = rec.order_history(events)
+    assert rec.client.call_count == 2
+    by_name = {e.name: e for e in out}
+    assert [by_name[n].chronological_position for n in ("Founding", "Aldward", "Sundering")] == [0, 1, 2]
+    assert all(by_name[n].calendar_system == "AR" for n in ("Founding", "Aldward", "Sundering"))
+
+
+def test_order_history_tie_then_relative_after():
+    # two same-date markers (a tie) + a relative event in the gap AFTER them, all
+    # the way through the orchestration (not just the engine).
+    events = [hev("Founding", date_text="1300"), hev("Charter", date_text="1300"),
+              hev("After")]
+    rec = make_reconciler([
+        _date_json((0, "AR", [1300]), (1, "AR", [1300])),  # tie
+        _place_json(("AR#1", [2])),                        # After -> gap after the tie
+    ])
+    out = rec.order_history(events)
+    by_name = {e.name: e for e in out}
+    assert [by_name[n].chronological_position for n in ("Founding", "Charter", "After")] == [0, 1, 2]
+
+
+def test_order_history_call_1_failure_degrades_to_relative():
+    # Call 1 returns garbage 3x -> empty spine -> everyone treated as undated and placed by Call 2
+    events = [hev("A", date_text="1300"), hev("B")]
+    rec = make_reconciler(["nope", "nope", "nope",            # 3 failed Call-1 attempts
+                           _place_json((f"{UNDATED}#0", [0, 1]))])  # Call 2 still runs
+    out = rec.order_history(events)
+    assert all(e.calendar_system is None for e in out)       # no dated spine survived
+    assert {e.chronological_position for e in out} == {0, 1}
+    assert rec.client.call_count == 4  # 3 Call-1 attempts (all failed) + 1 placement call
+
+
+def test_order_history_call_2_failure_keeps_dated_spine():
+    # Call 1 succeeds; Call 2 fails 3x -> dated events still stamped, relative -> Could Not Place
+    events = [hev("Dated", date_text="1300"), hev("Relative")]
+    rec = make_reconciler([_date_json((0, "AR", [1300])), "nope", "nope", "nope"])
+    out = rec.order_history(events)
+    by_name = {e.name: e for e in out}
+    assert by_name["Dated"].calendar_system == "AR" and by_name["Dated"].chronological_position == 0
+    assert by_name["Relative"].calendar_system is None and by_name["Relative"].chronological_position is None
+    assert rec.client.call_count == 4  # 1 date call + 3 failed placement attempts
+
+
+def test_order_history_guard_drops_unmoored_date_to_relative(caplog):
+    # Call 1 dates the event with parts that share no number with "1300" -> guard drops it;
+    # it then has no relative clue placement -> Could Not Place (not in the AR spine).
+    events = [hev("Bad", date_text="1300")]
+    rec = make_reconciler([_date_json((0, "AR", [9999])),   # 9999 unmoored from 1300
+                           _place_json()])                  # nothing placed
+    with caplog.at_level(logging.WARNING, logger="agents.reconciler"):
+        out = rec.order_history(events)
+    assert out[0].calendar_system is None and out[0].chronological_position is None
+    assert rec.client.call_count == 2  # date call + placement call (Bad became relative)
+    # prove the GUARD (not a plain date miss) drove the Could-Not-Place: its distinctive
+    # [REVIEW] "unmoored" log line. Without this, a date-miss path yields the same (None, None).
+    assert any(REVIEW_PREFIX in r.getMessage() and "unmoored" in r.getMessage()
+               for r in caplog.records)
+
+
+def test_order_history_retries_bad_json_then_succeeds():
+    events = [hev("A", date_text="1300"), hev("B")]
+    rec = make_reconciler(["garbage", _date_json((0, "AR", [1300])),   # Call 1: retry once
+                           _place_json((f"{UNDATED}#0", [1]))])         # Call 2
+    out = rec.order_history(events)
+    by_name = {e.name: e for e in out}
+    assert by_name["A"].calendar_system == "AR"
+    assert by_name["B"].chronological_position == 0          # placed on the undated timeline
+    assert rec.client.call_count == 3  # garbage + good date (retry) + placement
+
+
+# --- the live-LLM message builders: the one orchestration seam a fake-client
+# response can't validate (the canned reply's gap IDs are independent of what the
+# builder actually emitted). Pin them directly so a malformed gap ID or a dropped
+# [i] index prefix -- which would only fail in a live run -- is caught here. -----
+
+def test_build_date_message_lists_only_dated_events_with_original_index():
+    events = [hev("Founding", date_text="1300"), hev("Undated"),
+              hev("Sundering", date_text="1350")]
+    rec = Reconciler.__new__(Reconciler)            # builders need no client
+    msg = rec._build_date_message(events)
+    assert "[0]" in msg and "Founding" in msg and "1300" in msg     # dated, original index 0
+    assert "[2]" in msg and "Sundering" in msg and "1350" in msg    # dated, original index 2
+    assert "Undated" not in msg and "[1]" not in msg                # the undated event is omitted
+
+
+def test_build_placement_message_gap_ids_match_lookup_and_undated_carry_index():
+    events = [hev("Founding", date_text="1300"), hev("Sundering", date_text="1350"),
+              hev("Aldward"), hev("Borren")]
+    spines, gap_lookup = _build_spine_and_gaps([(0, "AR", [1300]), (1, "AR", [1350])])
+    rec = Reconciler.__new__(Reconciler)
+    msg = rec._build_placement_message(events, {0, 1}, spines)
+    # EVERY gap ID the message offers must be a real key the engine handed out -- no
+    # off-by-one in range(len(rank_groups)+1), no mislabeled system.
+    gap_tokens = re.findall(r"\[gap (.+?)\]", msg)
+    assert gap_tokens and all(g in gap_lookup for g in gap_tokens)
+    assert {"AR#0", "AR#1", "AR#2", f"{UNDATED}#0"} == set(gap_tokens)
+    # markers carry their dates so relative clues can anchor to them
+    assert "Founding (1300)" in msg and "Sundering (1350)" in msg
+    # each UNDATED event line carries its [i] index; dated events are NOT in the to-place list
+    assert "[2] Aldward" in msg and "[3] Borren" in msg
+    assert "[0] Founding" not in msg and "[1] Sundering" not in msg
+
+
+def test_build_placement_message_marks_ties_on_one_line():
+    # two same-date markers share ONE marker line (so "after Founding"/"after Charter"
+    # point at the same gap) -- the prompt's tie convention depends on this rendering.
+    events = [hev("Founding", date_text="1300"), hev("Charter", date_text="1300"),
+              hev("After")]
+    spines, gap_lookup = _build_spine_and_gaps([(0, "AR", [1300]), (1, "AR", [1300])])
+    rec = Reconciler.__new__(Reconciler)
+    msg = rec._build_placement_message(events, {0, 1}, spines)
+    assert "Founding (1300), Charter (1300)" in msg          # one shared marker line
+    gap_tokens = re.findall(r"\[gap (.+?)\]", msg)
+    assert {"AR#0", "AR#1", f"{UNDATED}#0"} == set(gap_tokens)  # tie -> only AR#0, AR#1

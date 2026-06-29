@@ -1,11 +1,19 @@
-"""Phase 4.1a -- LIVE / integration test for the reconciler MERGE step.
+"""Phase 4.1a + 4.1b -- LIVE / integration tests for the reconciler.
 
-One real Anthropic API call proving the headline case end-to-end: the LLM must
-MERGE a one-letter typo of the same place ("Maltaav"/"Maltraav") yet must NOT
-merge two genuinely different people whose names differ by one letter when the
-text states they're siblings ("CJ"/"DJ"). The deterministic Python (combiner,
-vetoes, validator) is covered exhaustively in test_reconciler.py; this test is
-only here to prove the LLM half makes the right call on the contrasting pair.
+Phase 4.1a (MERGE step): one real Anthropic API call proving the headline case
+end-to-end: the LLM must MERGE a one-letter typo of the same place
+("Maltaav"/"Maltraav") yet must NOT merge two genuinely different people whose
+names differ by one letter when the text states they're siblings ("CJ"/"DJ").
+
+Phase 4.1b (the timeline pass, ``order_history``): two live tests proving Sonnet
+output flows through the two-call pipeline -- dated events sort + a relative clue
+weaves in, and two distinct calendars stay on separate timelines. (Here we CAN
+assert by exact name: these events are hand-built, not extractor output, so their
+names are stable.)
+
+The deterministic Python (combiner, vetoes, validators, the timeline engine) is
+covered exhaustively in test_reconciler.py; these tests only prove the LLM halves
+make the right calls.
 
 Gating mirrors test_extractors_integration.py: marked ``integration`` (deselected
 by default -- a plain ``pytest`` skips it), and ``skipif``-ed when
@@ -18,7 +26,7 @@ from pathlib import Path
 
 import pytest
 
-from models.lore import Location, Character, Quote
+from models.lore import Location, Character, HistoryEvent, Quote
 from agents.reconciler import Reconciler
 
 try:
@@ -85,3 +93,42 @@ def test_reconciler_merges_typo_but_not_one_letter_siblings():
     _eyeball("reconciler — CJ/DJ siblings (expect NO merge)", result)
     names = sorted(e.name for e in result)
     assert names == ["CJ", "DJ"]  # both survive as separate entries
+
+
+# --- Phase 4.1b: order_history (the timeline pass) --------------------------
+
+@pytest.mark.integration
+def test_order_history_sorts_dates_and_places_relative_clue():
+    rec = Reconciler()
+    events = [
+        HistoryEvent(name="The Sundering", description="A cataclysm in 342 AR.",
+                     scope="world", date_text="342 AR"),
+        HistoryEvent(name="The Founding", description="The kingdom was founded in 100 AR.",
+                     scope="world", date_text="100 AR"),
+        HistoryEvent(name="The Reckoning",
+                     description="A war that broke out shortly before the Sundering.",
+                     scope="regional"),  # undated, relative clue -> before The Sundering
+    ]
+    out = rec.order_history(events)
+    pos = {e.name: e.chronological_position for e in out}
+    cal = {e.name: e.calendar_system for e in out}
+    # dated events sorted by date; the relative event lands before the Sundering
+    assert pos["The Founding"] < pos["The Reckoning"] < pos["The Sundering"]
+    assert cal["The Founding"] == cal["The Sundering"]      # same AR timeline
+    assert cal["The Reckoning"] == cal["The Sundering"]     # woven onto that timeline
+
+
+@pytest.mark.integration
+def test_order_history_multi_system_keeps_timelines_separate():
+    rec = Reconciler()
+    events = [
+        HistoryEvent(name="AR Event", description="Happened in 500 AR.", scope="world",
+                     date_text="500 AR"),
+        HistoryEvent(name="Era Event", description="Happened in the 4th Era, year 200.",
+                     scope="world", date_text="4th Era 200"),
+    ]
+    out = rec.order_history(events)
+    cal = {e.name: e.calendar_system for e in out}
+    # two different calendars -> two different system labels (not lumped together)
+    assert cal["AR Event"] is not None and cal["Era Event"] is not None
+    assert cal["AR Event"] != cal["Era Event"]

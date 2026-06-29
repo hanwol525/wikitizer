@@ -84,6 +84,22 @@ def _extract_json_object(text):
     return None
 
 
+def _parse_json_model(raw, model_cls):
+    """Parse raw LLM text into the given Pydantic model, or None if it can't. Same
+    tolerant strategy as _parse_decision -- the fence-stripped text first, then the
+    first balanced {...} object (so a conversational preamble Sonnet adds doesn't
+    burn all the retries) -- generalized to any model. The two timeline calls reuse
+    it for DateDecision / PlacementDecision."""
+    for candidate in (strip_code_fences(raw), _extract_json_object(raw)):
+        if not candidate:
+            continue
+        try:
+            return model_cls.model_validate_json(candidate)
+        except (ValidationError, ClaudeJSONError, json.JSONDecodeError):
+            continue
+    return None
+
+
 def _dedup_preserve_order(items):
     """Drop EXACT duplicates, keep first-seen order. A light .strip() guards against
     stray surrounding whitespace masquerading as a new value -- nothing cleverer,
@@ -372,7 +388,7 @@ def _sanity_guard_parts(parts, date_text) -> bool:
     This catches the clear numeric mismatch (e.g. [343] for "342 AR", or a tuple
     sharing none of the date_text's numbers). A near-miss that still shares a number slips
     through, but the verbatim date renders anyway, so the worst case is a minor
-    mis-sort, never lost or fabricated lore.
+    mis-sort, never lost or fabricated lore."""
     digits = {int(n) for n in re.findall(r"\d+", date_text or "")}
     if not digits:
         return True
@@ -607,6 +623,67 @@ Rules for the JSON:
 """
 
 
+DATE_EXTRACTION_PROMPT = """\
+You are building a timeline for a D&D lore wiki. You are given history events that each state an explicit in-world DATE. For each one, identify (a) which calendar SYSTEM the date is in, and (b) the date as a sortable list of numeric PARTS.
+
+You do NOT order the events and you do NOT assign any position number -- you only read each date into a system label + parts. Sorting is done by other code.
+
+## Parts: a list of numbers, biggest unit FIRST
+Turn the stated date into a list of integers, largest unit first, so they sort correctly:
+- "1347" -> [1347]
+- "342 AR" -> [342]
+- "4th Era 200" -> [4, 200]        (era 4, year 200)
+- "Third Age, year 12" -> [3, 12]  ("Third" is the 3rd age)
+Read a written-out ordinal as its number ("Third" -> 3, "Fourth Era" -> 4). Use the SAME unit structure for every event in one system (e.g. if one Elder Scrolls date is [era, year], they all are), so the lists compare correctly. If a date gives only the larger unit (e.g. just "the Third Age", no year), give just that ([3]).
+
+## System: a consistent label for the calendar
+Give each date a short label for its calendar -- "AR years", "Elder Scrolls eras", "Hebrew calendar", etc. Use the SAME label for every event in the same calendar so they group together. If two events use DIFFERENT notations but the text states they are the SAME calendar (e.g. "1347, that is, Third Era 347"), give them the same label and put their parts on the same scale.
+
+## CRITICAL: only in-world, stated information
+- Use ONLY what the event's date text states. Do NOT use real-world calendar knowledge -- you must NOT convert between calendars using facts you know about the real world (e.g. that a Hebrew year equals some Gregorian year). Only an equivalence the campaign text itself states counts.
+- If a date is too vague to become any number ("long ago", "in the early days"), leave that event OUT entirely -- it's handled as an undated event.
+
+## Output -- return ONLY this JSON, nothing else
+{"dated": [{"index": <event index>, "system": "<calendar label>", "parts": [<numbers, biggest unit first>]}, ...]}
+
+- "index" is the integer shown in [brackets] before the event.
+- Include only events whose date you could turn into parts; omit any you couldn't.
+- If none, return {"dated": []}.
+- Return ONLY the JSON object -- no preamble, no markdown fences.
+"""
+
+
+PLACEMENT_PROMPT = """\
+You are building a timeline for a D&D lore wiki. The dated events are already sorted into one or more TIMELINES, each a list of dated markers with numbered GAPS between them. Your job: take each UNDATED event and choose which gap it belongs in, from the relative-time clues in its description ("before the Empire fell", "after the dynasty collapsed").
+
+You do NOT assign position numbers -- you only choose a gap (by its ID) for each event. The numbering is done by other code.
+
+## How gaps work
+Each timeline is shown as gaps and markers in order: [gap S#0], marker, [gap S#1], marker, [gap S#2], ... So gap S#0 is BEFORE the first marker, gap S#1 is BETWEEN the first and second, and the last gap is AFTER the final marker. "Before the Sundering" -> the gap immediately before the Sundering marker; "after the Sundering" -> the gap immediately after it.
+
+## Markers that share a spot (ties)
+Two markers can sit at the SAME spot (same date) -- they're shown together on one marker line, e.g. "marker: Founding (1300), Charter (1300)". Because they're at the same spot, "after Founding" and "after Charter" mean the SAME gap (the one right after that shared marker line). Don't be thrown by two names at one spot; treat them as one boundary.
+
+## Several events in one gap
+If several undated events fall in the same gap, list them in that gap IN ORDER, earliest first -- so "the feud, which came after the rebellion" puts the rebellion before the feud within their shared gap.
+
+## The undated timeline
+There is also an "Undated timeline" for events that have a relative order among THEMSELVES but are NOT tied to any dated marker ("the Aldward rise, then the Borren feud", neither linked to a date). Place those in that timeline's single gap, in order.
+
+## CRITICAL: don't guess
+- Place an event ONLY where its clue actually supports. If an event has no usable relative clue and no link to any marker or other event, LEAVE IT OUT entirely -- it goes under "Could Not Place" rather than being guessed into a spot.
+- Use only what the descriptions state. No real-world knowledge.
+
+## Output -- return ONLY this JSON, nothing else
+{"placements": [{"gap": "<a gap ID from above>", "events": [<event indices in that gap, earliest first>]}, ...]}
+
+- Use the EXACT gap IDs shown (e.g. "AR years#1", "(undated)#0").
+- Each undated event goes in AT MOST one gap. Omit any you can't place.
+- If you can place none, return {"placements": []}.
+- Return ONLY the JSON object -- no preamble, no markdown fences.
+"""
+
+
 class Reconciler(BaseAgent):
     """Phase 4.1a -- de-duplicates a list of ONE entity type. See module docstring."""
 
@@ -741,3 +818,132 @@ class Reconciler(BaseAgent):
                     "flagged).", label, len(entries), len(result),
                     len(decision.merges), len(decision.possible_duplicates))
         return result
+
+    # ----------------------------------------------------------------------- #
+    # Phase 4.1b -- the timeline pass (two Claude calls on top of the Brief A
+    # engine above). The LLM emits sort keys (Call 1) and gap choices (Call 2);
+    # Python owns every chronological_position.
+    # ----------------------------------------------------------------------- #
+
+    def order_history(self, events: list) -> list:
+        """Phase 4.1b -- the timeline pass. Fills calendar_system + chronological_position
+        on a list of (already-deduplicated) HistoryEvents, via two Claude calls on top of
+        the pure-Python engine. Call 1 reads each event's stated date into a sortable
+        tuple; Python sorts those into a spine + gaps; Call 2 drops the undated events into
+        the gaps; Python weaves + stamps. The LLM never emits a position.
+
+        Degrades gracefully: a failed Call 1 -> empty spine (events ordered relatively, or
+        Could Not Place); a failed Call 2 -> the dated spine still stamps, only the relative
+        events fall to Could Not Place. _weave_and_stamp always runs, so a total LLM failure
+        yields a less-ordered -- never corrupted -- timeline."""
+        if not events:
+            return list(events)
+
+        # Call 1 only runs if something actually states a date.
+        dated = []  # (index, system, parts), post-validation + post-guard
+        if any(e.date_text and e.date_text.strip() for e in events):
+            dated = self._extract_dates(events)
+
+        spines, gap_lookup = _build_spine_and_gaps(dated)
+        dated_indices = {idx for idx, _, _ in dated}
+
+        # Call 2 only runs if there's something undated to place.
+        placements = {}
+        if any(i not in dated_indices for i in range(len(events))):
+            placements = self._place_relatives(events, dated_indices, spines, gap_lookup)
+
+        return _weave_and_stamp(events, spines, placements, gap_lookup)
+
+    def _extract_dates(self, events) -> list:
+        """Call 1. Returns a list of (index, system, parts) that passed validation AND the
+        grounding guard. Retries up to 3x on malformed/invalid JSON; total failure -> []
+        (empty spine). A per-event guard failure drops just that event to relative placement."""
+        decision = None
+        for attempt in range(3):
+            raw = self.call_claude(DATE_EXTRACTION_PROMPT, self._build_date_message(events))
+            decision = _parse_json_model(raw, DateDecision)
+            if decision is None:
+                logger.warning("Timeline dates: bad JSON (attempt %d/3); raw: %r", attempt + 1, raw)
+                continue
+            problems = _validate_date_decision(decision, events)
+            if problems:
+                logger.warning("Timeline dates: invalid (attempt %d/3): %s",
+                               attempt + 1, "; ".join(problems))
+                decision = None
+                continue
+            break
+        if decision is None:
+            logger.error("Timeline dates: no usable decision after 3 attempts; "
+                         "treating all events as undated.")
+            return []
+
+        dated = []
+        for d in decision.dated:
+            if _sanity_guard_parts(d.parts, events[d.index].date_text):
+                dated.append((d.index, d.system, d.parts))
+            else:
+                logger.warning("%s Timeline: parts %r for '%s' (date_text %r) look unmoored "
+                               "from the stated date; dropping it to relative placement.",
+                               REVIEW_PREFIX, d.parts, events[d.index].name,
+                               events[d.index].date_text)
+        return dated
+
+    def _place_relatives(self, events, dated_indices, spines, gap_lookup) -> dict:
+        """Call 2. Returns {gap_id: [event indices in order]} for _weave_and_stamp. Retries
+        up to 3x; total failure -> {} (the relatives fall to Could Not Place; the dated
+        spine still stamps)."""
+        relative = [i for i in range(len(events)) if i not in dated_indices]
+        decision = None
+        for attempt in range(3):
+            raw = self.call_claude(
+                PLACEMENT_PROMPT, self._build_placement_message(events, dated_indices, spines))
+            decision = _parse_json_model(raw, PlacementDecision)
+            if decision is None:
+                logger.warning("Timeline placement: bad JSON (attempt %d/3); raw: %r", attempt + 1, raw)
+                continue
+            problems = _validate_placement_decision(decision, events, dated_indices, gap_lookup)
+            if problems:
+                logger.warning("Timeline placement: invalid (attempt %d/3): %s",
+                               attempt + 1, "; ".join(problems))
+                decision = None
+                continue
+            break
+        if decision is None:
+            logger.error("Timeline placement: no usable decision after 3 attempts; "
+                         "%d relative event(s) -> Could Not Place.", len(relative))
+            return {}
+        return {p.gap: p.events for p in decision.placements}
+
+    def _build_date_message(self, events) -> str:
+        """Call 1's user message: only the events that actually state a date, each with its
+        ORIGINAL index (so the engine maps results back correctly)."""
+        lines = ["These history events state a date. For each, give its calendar system and "
+                 "sortable parts. Each is prefixed by its index.\n"]
+        for i, e in enumerate(events):
+            if e.date_text and e.date_text.strip():
+                lines.append(f"[{i}] date={e.date_text!r}  (event: {e.name})")
+        return "\n".join(lines)
+
+    def _build_placement_message(self, events, dated_indices, spines) -> str:
+        """Call 2's user message: each timeline shown as interleaved gaps + markers (markers
+        named with their dates so relative clues can match them), then the undated events
+        with their descriptions (which carry the relative clues)."""
+        lines = ["Place each undated event into a gap on one of the timelines below, using "
+                 "the gap's ID.\n"]
+        for system, rank_groups in spines.items():
+            if system == UNDATED:
+                lines.append("\nUndated timeline (events with no date, ordered only relative "
+                             "to each other):")
+            else:
+                lines.append(f"\nTimeline: {system}")
+            for k in range(len(rank_groups) + 1):
+                lines.append(f"  [gap {_gap_id(system, k)}]")
+                if k < len(rank_groups):
+                    markers = ", ".join(f"{events[i].name} ({events[i].date_text})"
+                                        for i in rank_groups[k])
+                    lines.append(f"  -- marker: {markers}")
+        lines.append("\nUndated events to place (read each description for its relative order):")
+        for i in range(len(events)):
+            if i not in dated_indices:
+                lines.append(f"  [{i}] {events[i].name}: {events[i].description!r}")
+        return "\n".join(lines)
