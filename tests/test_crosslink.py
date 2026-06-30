@@ -158,7 +158,7 @@ def test_identical_name_across_types_both_anchored_surface_held_out(caplog):
     # The canonical scenario the pass-4 ambiguity branch is written for: a realm that
     # is BOTH a Location (the place) and an Organization (the governing body), sharing
     # one IDENTICAL name. Unlike test_slug_collision_suffixes_the_later_entity (two
-    # DIFFERENT names -- "Riverton"/"Riverton!" -- that merely slug alike), here the
+    # DIFFERENT names -- "Riverton"/"RIVERTON" -- that merely slug alike), here the
     # name string itself is the same, so on top of the slug-suffixing we also hit the
     # "two entities share the name" path and Pass 4's ambiguity hold-out.
     with caplog.at_level(logging.WARNING):
