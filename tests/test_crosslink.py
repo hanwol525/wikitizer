@@ -154,6 +154,30 @@ def test_same_alias_on_two_entities_is_held_out_of_pool(caplog):
     assert REVIEW_PREFIX in caplog.text
 
 
+def test_identical_name_across_types_both_anchored_surface_held_out(caplog):
+    # The canonical scenario the pass-4 ambiguity branch is written for: a realm that
+    # is BOTH a Location (the place) and an Organization (the governing body), sharing
+    # one IDENTICAL name. Unlike test_slug_collision_suffixes_the_later_entity (two
+    # DIFFERENT names -- "Riverton"/"Riverton!" -- that merely slug alike), here the
+    # name string itself is the same, so on top of the slug-suffixing we also hit the
+    # "two entities share the name" path and Pass 4's ambiguity hold-out.
+    with caplog.at_level(logging.WARNING):
+        cmap = build_crosslink_map([loc("Krieger Imperium"), org("Krieger Imperium")])
+    # Each entity still gets its own distinct, suffixed anchor (correct in the
+    # per-entity list even though the name->anchor dict can only hold the first).
+    assert cmap.entity_anchors == ["krieger-imperium", "krieger-imperium-2"]
+    assert cmap.anchors["Krieger Imperium"] == "krieger-imperium"
+    # The shared surface is genuinely ambiguous (claimed by both anchors), so it is
+    # held out of the source pool entirely -- no inbound link anywhere, by design.
+    assert "Krieger Imperium" not in surfaces(cmap)
+    out = add_crosslinks("They marched on Krieger Imperium at dawn.", cmap, None)
+    assert out == "They marched on Krieger Imperium at dawn."  # nothing linked
+    # Both the shared-name and the ambiguity hold-out are flagged for a human.
+    assert REVIEW_PREFIX in caplog.text
+    assert "share the name" in caplog.text
+    assert "left out of the link pool" in caplog.text
+
+
 def test_require_article_member_is_in_pool_but_article_required():
     cmap = build_crosslink_map([loc("Founding")], common_words={"require_article": ["Founding"]})
     assert ("Founding", "founding") in cmap.sources
