@@ -114,7 +114,7 @@ def test_slugify_all_punctuation_is_empty_string():
 
 def test_slug_collision_suffixes_the_later_entity(caplog):
     with caplog.at_level(logging.WARNING):
-        cmap = build_crosslink_map([loc("Riverton"), loc("Riverton!")])
+        cmap = build_crosslink_map([loc("Riverton"), loc("RIVERTON")])
     assert cmap.entity_anchors == ["riverton", "riverton-2"]
     assert REVIEW_PREFIX in caplog.text
     assert "slug collision" in caplog.text
@@ -501,6 +501,13 @@ def test_left_word_boundary_does_not_fire_after_a_word_char():
     ):
         assert add_crosslinks(block, cmap, None) == block
 
+def test_two_entities_with_identical_name_drop_shared_surface_as_ambiguous(caplog):
+       # A realm that's both a Location AND an Organization, same exact name string.
+       with caplog.at_level(logging.WARNING):
+           cmap = build_crosslink_map([loc("Riverton"), org("Riverton")])
+       assert cmap.entity_anchors == ["riverton", "riverton-2"]  # both anchored
+       assert "Riverton" not in surfaces(cmap)                    # shared surface dropped
+       assert REVIEW_PREFIX in caplog.text
 
 # --- loader ----------------------------------------------------------------- #
 
