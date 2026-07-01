@@ -227,3 +227,4 @@ __marimo__/
 tests/fixtures/real_messages.py
 tests/output/
 phase-3.10-test-messages.md
+config/speaker_map.json
