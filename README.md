@@ -15,5 +15,5 @@ Content goes through the markdown renderer (after cross-link pass) -> markdown r
 - Support for extracted RCS/SMS logs
 - Support for extracted Discord logs
 - Support for notes in text documents
-- Source selection and multi-doc generation capabilities (i.e. "include all lore from the three given sources in the real wiki document, and include lore from Source A and Source B but not Source C so I can keep Source C's info secret from my players")
+- Source selection and multi-doc generation capabilities (i.e. "include all lore from the three given sources in the real wiki document, and include lore from Source A and Source B but not Source C in a secondary fake wiki document so I can keep Source C's info secret from my players")
 - GUI
