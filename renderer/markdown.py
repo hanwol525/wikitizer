@@ -5,14 +5,18 @@ sibling of renderer/footnotes.py and renderer/crosslink.py in the cheap,
 deterministic outer layer -- every expensive LLM step is already done upstream, so
 rendering is mechanical and repeatable.
 
-This file currently holds only `render_history` (Phase 4.4 Brief 2); the five
-entity render functions and the top-level assembly arrive in Brief 3.
+It holds the six section renderers -- `render_history` (the timeline, Brief 2)
+plus the five entity renderers (`render_locations` / `render_characters` /
+`render_organizations` / `render_items` / `render_people`, Brief 3) -- and the
+top-level `render_wiki` that wires all six sections plus the footnotes block into
+one document.
 """
 
 from typing import Optional
 
-from renderer.crosslink import CrosslinkMap, add_crosslinks
+from renderer.crosslink import CrosslinkMap, add_crosslinks, build_crosslink_map
 from renderer.footnotes import FootnoteRegistry
+from models.lore import Location, Character, Organization, Item, PeopleAndCultures
 
 
 # Both notes are heads-ups TO THE READER -- they never claim the tool reconciles
@@ -154,4 +158,147 @@ def render_history(events, cmap: CrosslinkMap, registry: FootnoteRegistry) -> st
 
     # Blank line between every block so markdown doesn't fuse a heading into the
     # list below it (or two blocks into one paragraph) when rendered.
+    return "\n\n".join(blocks)
+
+
+def _render_entity(entity, anchor: str, cmap: CrosslinkMap,
+                   registry: FootnoteRegistry) -> str:
+    """Render ONE entity: a ### heading (with its <a id> stamped inline) plus a
+    prose body and end-of-entity footnote markers.
+
+    Entities always have an anchor (unlike events, they're never gated out), so we
+    always stamp the <a id>. The body is the entity's `details` joined into one
+    prose paragraph -- we don't try to footnote individual facts, because the
+    stored `details` and `supporting_quotes` lists have no position-by-position
+    mapping (the quote list is deduplicated at extraction), so the quotes back the
+    entity as a whole and their markers land at the end, same as an event.
+    """
+    # The <a id> sits INLINE at the START of the heading text ("### <a id>Name"),
+    # not on a line of its own above it -- a raw-HTML line above the heading would
+    # stop the "### " from being read as a heading. (The display renderer must pass
+    # raw HTML through; already logged against the renderer-choice decision.)
+    heading = f'### <a id="{anchor}"></a>{entity.name}'
+
+    # details -> one prose paragraph, joined with spaces. We do NOT massage the
+    # facts to flow into each other; they just need to be present. The WHOLE
+    # paragraph is ONE cross-link block, with the entity's own anchor as
+    # `this_anchor`, so a mention of the entity's own name inside its body doesn't
+    # link back to itself.
+    body = add_crosslinks(" ".join(entity.details), cmap, anchor)
+
+    # Footnote markers for the entity's quote pool, appended at the end of the body.
+    refs = "".join(f"[^{registry.add(q)}]" for q in entity.supporting_quotes)
+
+    # A named-but-factless entity (empty `details`) is a supported extractor output
+    # -- a location/etc. named with no surviving facts is emitted anyway. Rendering
+    # the empty body paragraph regardless would leave a lone floating `[^N]` marker
+    # (or, with no quotes, a heading trailed by blank lines). So when there's no
+    # body, drop the paragraph and hang any footnote markers on the heading itself:
+    # the entity still renders as a clean heading and keeps its quote provenance.
+    if not body:
+        return f"{heading}{refs}"
+    return f"{heading}\n\n{body}{refs}"
+
+
+def _render_entity_section(label: str, pairs, cmap: CrosslinkMap,
+                           registry: FootnoteRegistry) -> str:
+    """Render one whole entity SECTION: a "## {label}" header plus every entity
+    under it, sorted alphabetically by name. Returns "" when there are no entities
+    of this type, so the caller drops the section (never a bare empty header).
+
+    `pairs` is a list of (entity, anchor) already paired by the caller -- pairing
+    up front means an anchor can't desync from its entity when we sort.
+    """
+    if not pairs:
+        return ""
+    # Alphabetical by name; the anchor (always present, always unique) is the
+    # tiebreak, so two same-named entries render in a stable order every run.
+    rows = sorted(pairs, key=lambda p: (p[0].name, p[1]))
+    bodies = "\n\n".join(_render_entity(ent, anchor, cmap, registry)
+                         for ent, anchor in rows)
+    return f"## {label}\n\n{bodies}"
+
+
+def render_locations(pairs, cmap: CrosslinkMap, registry: FootnoteRegistry) -> str:
+    return _render_entity_section("Locations", pairs, cmap, registry)
+
+
+def render_characters(pairs, cmap: CrosslinkMap, registry: FootnoteRegistry) -> str:
+    # NOTE: Characters render uniformly with the other entities -- `is_pc` and
+    # `player_name` are intentionally not surfaced yet (stored-but-unrendered, like
+    # HistoryEvent.scope). A future phase can label PCs with their player.
+    return _render_entity_section("Characters", pairs, cmap, registry)
+
+
+def render_organizations(pairs, cmap: CrosslinkMap, registry: FootnoteRegistry) -> str:
+    return _render_entity_section("Organizations", pairs, cmap, registry)
+
+
+def render_items(pairs, cmap: CrosslinkMap, registry: FootnoteRegistry) -> str:
+    return _render_entity_section("Items", pairs, cmap, registry)
+
+
+def render_people(pairs, cmap: CrosslinkMap, registry: FootnoteRegistry) -> str:
+    # The pretty display label lives here (the class is PeopleAndCultures, which a
+    # Python identifier can't spell with a space or the bare word "and").
+    return _render_entity_section("People & Cultures", pairs, cmap, registry)
+
+
+def render_wiki(locations, characters, events, organizations, items, people,
+                common_words=None) -> str:
+    """Top-level: assemble the whole wiki markdown from the six reconciled lore
+    lists. Builds the cross-link map ONCE over every entity + event, then renders
+    each section in a FIXED order -- which is also the order footnote numbers get
+    assigned, so they climb in order down the page.
+
+    Section / render / footnote-numbering order:
+        Locations, History, People & Cultures, Organizations, Characters, Items.
+
+    Returns "" for a completely empty world (every section empty, no footnotes).
+
+    `common_words` is the loaded crosslink_words.json config (or None). This
+    function is the seam the eventual whole-pipeline entry point (main.py) plugs
+    into -- it takes the six typed lists explicitly.
+    """
+    # Concatenate the five entity types into ONE list for the map (build_crosslink_map
+    # takes a single entity list). The order here only decides which entity keeps
+    # the clean slug on a cross-type name clash -- cosmetic, since both still get an
+    # anchor and the ambiguous surface drops out either way -- so we just match the
+    # display order for least surprise.
+    all_entities = (list(locations) + list(people) + list(organizations)
+                    + list(characters) + list(items))
+
+    cmap = build_crosslink_map(all_entities, events=events, common_words=common_words)
+
+    # Pair every entity with its anchor, THEN split back apart by type. We split on
+    # isinstance (an object's type can't drift) rather than by counting how many of
+    # each we concatenated -- no fragile length arithmetic, and the anchor stays
+    # glued to its entity through the split.
+    paired = list(zip(all_entities, cmap.entity_anchors))
+    loc_pairs = [pa for pa in paired if isinstance(pa[0], Location)]
+    people_pairs = [pa for pa in paired if isinstance(pa[0], PeopleAndCultures)]
+    org_pairs = [pa for pa in paired if isinstance(pa[0], Organization)]
+    char_pairs = [pa for pa in paired if isinstance(pa[0], Character)]
+    item_pairs = [pa for pa in paired if isinstance(pa[0], Item)]
+
+    # ONE registry shared across every section, so footnote numbers are unique and
+    # assigned in render order. History takes (events, cmap, registry), not pairs --
+    # it reads event_anchors off the map itself, so it needs the events list.
+    registry = FootnoteRegistry()
+    sections = [
+        render_locations(loc_pairs, cmap, registry),
+        render_history(events, cmap, registry),
+        render_people(people_pairs, cmap, registry),
+        render_organizations(org_pairs, cmap, registry),
+        render_characters(char_pairs, cmap, registry),
+        render_items(item_pairs, cmap, registry),
+    ]
+
+    # The footnote-definitions block is rendered LAST (after every section has
+    # registered its quotes) and appended at the very end.
+    footnotes = registry.render_definitions()
+
+    # Drop empty pieces so we never emit a bare header or stray blank, then join
+    # with one blank line between blocks.
+    blocks = [b for b in sections + [footnotes] if b]
     return "\n\n".join(blocks)
