@@ -262,7 +262,7 @@ def load_crosslink_words(path: str = DEFAULT_WORDS_PATH) -> dict:
     }
 
 
-def build_crosslink_map(noun_entities: list, events=None, common_words: Optional[dict] = None) -> CrosslinkMap:
+def build_crosslink_map(noun_entities: list, events: Optional[list] = None, common_words: Optional[dict] = None) -> CrosslinkMap:
     """Build the resolved `CrosslinkMap` over the five NOUN types (`Location`,
     `Character`, `Organization`, `Item`, `PeopleAndCultures`) plus, optionally, the
     `HistoryEvent`s. An ELIGIBLE event -- one whose article-stripped name isn't
