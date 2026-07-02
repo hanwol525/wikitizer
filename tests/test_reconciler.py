@@ -764,56 +764,45 @@ def test_weave_distinguishes_undated_placed_from_could_not_place():
       index 1 -> undated but placed into a gap      -> (None, int)
       index 2 -> floating (placed nowhere at all)   -> (None, None)
     """
-    # Three minimal HistoryEvents built via the file's `hev` helper (only `name`
-    # matters for readability; nothing below reads the event body).
+    # Build inputs the same way the sibling weave tests do: real HistoryEvents
+    # (the dated one carries a date_text), and spines/gaps produced by
+    # _build_spine_and_gaps instead of hand-rolled -- so we exercise the exact
+    # gap-id format ("(undated)#0") the real pipeline emits, not a stand-in.
     events = [
-        hev("The Founding"),     # 0: will be dated
-        hev("A Quiet Season"),   # 1: undated but placed
-        hev("A Rumor"),          # 2: floating
+        hev("The Founding", date_text="400"),  # 0: dated
+        hev("A Quiet Season"),                  # 1: undated but placed
+        hev("A Rumor"),                         # 2: floating
     ]
+    # One dated marker (event 0) -> _build_spine_and_gaps hands back its "Crown
+    # Reckoning" spine PLUS the UNDATED pseudo-spine and its gap id.
+    spines, gaps = _build_spine_and_gaps([(0, "Crown Reckoning", [400])])
 
-    # spines maps system -> rank_groups, where rank_groups[k] is the list of
-    # event indices tied at rank k.
-    #   - "Crown Reckoning" holds the one dated event (index 0), alone at rank 0.
-    #   - The UNDATED pseudo-spine has NO dated markers of its own (empty list),
-    #     so the placed relative arrives purely through a gap, never a rank.
-    spines = {
-        "Crown Reckoning": [[0]],
-        UNDATED: [],
-    }
-
-    # gap_lookup maps a gap id -> (system, slot k). One gap on the UNDATED spine
-    # at slot 0. placements drops event 1 into that gap.
-    gap_lookup = {"g_undated_0": (UNDATED, 0)}
-    placements = {"g_undated_0": [1]}
-    # Event 2 is intentionally absent from every placement AND every spine rank.
-    # It never lands in any sequence, so it falls through to the (None, None)
-    # default. "Could Not Place" is produced by omission, not by a flag.
-
-    out = _weave_and_stamp(events, spines, placements, gap_lookup)
+    # Drop event 1 into the undated spine's first (and only) gap. Event 2 appears
+    # in NO placement -> it falls through to the (None, None) default. "Could Not
+    # Place" is produced by omission, not by a flag.
+    out = _weave_and_stamp(events, spines, {f"{UNDATED}#0": [1]}, gaps)
     dated, placed, floating = out[0], out[1], out[2]
 
     # dated -> its own system's dated timeline
     assert dated.calendar_system == "Crown Reckoning"
     assert dated.chronological_position is not None  # it's 0 -- falsy, hence `is not None`
 
-    # undated but placed -> ## Undated Events. calendar_system is None (not a
-    # dated system), but position is a real int (we know its relative order).
-    # Position is 0 here on purpose: the *falsy* int, doubling as a warning that
-    # consumers must check `is not None`, never truthiness.
+    # undated but placed -> ## Undated Events: None system, but a real int position.
+    # Position is 0 on purpose (the *falsy* int), so this also documents that a
+    # placed event can legitimately sit at 0 -- consumers MUST use `is not None`,
+    # never truthiness.
     assert placed.calendar_system is None
     assert placed.chronological_position == 0
 
-    # floating -> ## Could Not Place. Both fields None.
+    # floating -> ## Could Not Place: both fields None.
     assert floating.calendar_system is None
     assert floating.chronological_position is None
 
-    # Thesis of the whole test: `placed` and `floating` BOTH have
-    # calendar_system=None, so that field cannot separate them. Only
-    # chronological_position does -- one is an int, the other is None. Asserting
-    # them as different KINDS is exactly what a naive membership check would miss.
+    # Thesis: `placed` and `floating` BOTH have calendar_system=None, so that field
+    # alone can't tell them apart -- only chronological_position does. It's a real
+    # int for `placed` (vs None for `floating`, asserted just above), which is
+    # exactly the "different kinds" distinction a naive membership check misses.
     assert isinstance(placed.chronological_position, int)
-    assert floating.chronological_position is None
 
 
 # --- 3e. _validate_placement_decision ---------------------------------------

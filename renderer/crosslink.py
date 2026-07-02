@@ -149,8 +149,10 @@ def _looks_sentence_ish(surface: str) -> bool:
 
     The four Location-shaped noun types can pick up a sentence-ish FALLBACK name
     via the extractors' "missing name -> first detail" path. Those go into the
-    source pool (unlike history-event names, which are excluded entirely), so this
-    gate is the reason they can't false-fire on a verbatim sentence repeat. It's
+    source pool, so this gate is the reason they can't false-fire on a verbatim
+    sentence repeat. (History-event names face the same gate, but harder: a
+    sentence-ish event name earns no anchor at all and never enters the pool --
+    see `build_crosslink_map`'s Pass 1b.) It's
     belt-and-suspenders over longest-match + word boundaries (a sentence-ish name
     would only ever match a full verbatim sentence, which ~never recurs) -- it turns
     "safe by luck" into "safe by design." Such a name still gets its ANCHOR as a
@@ -221,12 +223,22 @@ class CrosslinkMap:
     - `_lookup`: surface_form -> (anchor, article_required), the match handler's
       private lookup. Underscore-prefixed: it's an implementation detail of the
       walk, not part of the public contract.
+    - `event_anchors`: parallel to the `events` passed to `build_crosslink_map` --
+      ``event_anchors[i]`` is event i's anchor, or None where the event earned none
+      (its sentence-shaped name was gated out). The same parallel-list pattern as
+      `entity_anchors`, just with an opt-out slot the renderer skips.
     """
     anchors: dict
     entity_anchors: list
     sources: list
     pattern: Optional["re.Pattern"]
     _lookup: dict = field(default_factory=dict)
+    # parallel to the `events` passed to build_crosslink_map: event_anchors[i] is
+    # event i's anchor, or None where the event earned none (a sentence-shaped name
+    # that was gated out). The renderer zips this with the events to stamp anchors,
+    # stamping nothing where it's None -- the same parallel-list pattern as
+    # entity_anchors, just with an opt-out slot.
+    event_anchors: list = field(default_factory=list)
 
 
 def load_crosslink_words(path: str = DEFAULT_WORDS_PATH) -> dict:
@@ -250,13 +262,19 @@ def load_crosslink_words(path: str = DEFAULT_WORDS_PATH) -> dict:
     }
 
 
-def build_crosslink_map(noun_entities: list, common_words: Optional[dict] = None) -> CrosslinkMap:
+def build_crosslink_map(noun_entities: list, events=None, common_words: Optional[dict] = None) -> CrosslinkMap:
     """Build the resolved `CrosslinkMap` over the five NOUN types (`Location`,
-    `Character`, `Organization`, `Item`, `PeopleAndCultures`). `HistoryEvent`s are
-    NOT passed here -- they are neither a link target (model-generated, sentence-ish
-    names make ugly anchors) nor a source (they never recur verbatim to generate
-    inbound links). An event's `description` is still run through `add_crosslinks`
-    later, with ``this_anchor=None``, so noun mentions inside it light up.
+    `Character`, `Organization`, `Item`, `PeopleAndCultures`) plus, optionally, the
+    `HistoryEvent`s. An ELIGIBLE event -- one whose article-stripped name isn't
+    sentence-ish, judged by the SAME `_looks_sentence_ish` gate the entity source
+    pool uses -- is both a target (it earns an anchor, assigned AFTER the entities
+    so an event-vs-entity slug clash suffixes the event, never the entity) and a
+    source (its name + aliases join the same claim pools). A sentence-shaped event
+    name (the extractor's "missing name -> first detail" fallback) is NEITHER: no
+    anchor (None in `event_anchors`) and nothing in the pool. Entities always get an
+    anchor regardless of the gate; events must clear it to earn one. Either way an
+    event's `description` is still run through `add_crosslinks` at render time, so
+    noun mentions inside it light up.
 
     All the messy cases are resolved HERE, once, at build time -- never during the
     walk. `common_words` is the loaded `crosslink_words.json` config (or None for
@@ -309,6 +327,45 @@ def build_crosslink_map(noun_entities: list, common_words: Optional[dict] = None
                            "anchors %r and %r both exist (see entity_anchors).",
                            REVIEW_PREFIX, ent.name, anchors[ent.name], anchor)
 
+    # --- Pass 1b: give each ELIGIBLE event a unique anchor, AFTER the entities. --- #
+    # Events differ from entities twice over. (1) They're gated: a sentence-shaped
+    # event name (the extractor's "missing name -> first detail" fallback) is not a
+    # useful link target, so it earns NO anchor -- we store None in the parallel
+    # list and the renderer stamps nothing there. (Entities always get an anchor;
+    # an event has to clear the gate.) (2) They suffix AFTER the entities: we keep
+    # using the SAME `used_anchors` set from Pass 1, so on an event-vs-entity slug
+    # clash the ENTITY keeps the clean slug ("riverton") and the event takes the
+    # suffix ("riverton-2"). That ordering IS the "entities before events" tiebreak
+    # -- it falls out of running this loop second, with no explicit type-ranking.
+    events = events or []
+    event_anchors = []      # parallel to `events`; None where an event earns no anchor
+    for i, ev in enumerate(events):
+        # Gate on the SAME article-stripped, NFC'd form the entity source-gate uses,
+        # so "eligible event" means exactly what "sentence-ish source" means for
+        # entities -- one rule, no second definition to drift.
+        if _looks_sentence_ish(_nfc(_split_article(ev.name))):
+            event_anchors.append(None)     # gated out -> no anchor, no pool entry
+            continue
+        base = slugify(ev.name)
+        if not base:
+            # Same empty-slug guard as Pass 1, but with an event-scoped fallback id
+            # so it can never collide with an entity-<N> fallback. Flagged, because
+            # an all-punctuation name is odd enough for a human to want to see.
+            base = f"event-{i}"
+            logger.warning("%s crosslink: event name %r slugs to empty; using fallback "
+                           "anchor %r.", REVIEW_PREFIX, ev.name, base)
+        anchor = base
+        if anchor in used_anchors:
+            # Identical suffixing to Pass 1: bump -2, -3, ... until unique, and flag.
+            k = 2
+            while f"{base}-{k}" in used_anchors:
+                k += 1
+            anchor = f"{base}-{k}"
+            logger.warning("%s crosslink: slug collision on %r; event %r -> anchor %r.",
+                           REVIEW_PREFIX, base, ev.name, anchor)
+        used_anchors.add(anchor)
+        event_anchors.append(anchor)
+
     # --- Pass 2: gather surface-form CLAIMS (name claims and alias claims). --- #
     # A claim is "surface form S points at anchor A". We track names and aliases
     # separately so the name-beats-alias rule can be applied before we look for
@@ -324,6 +381,24 @@ def build_crosslink_map(noun_entities: list, common_words: Optional[dict] = None
             a = _nfc(_split_article(alias))
             if a.strip():
                 alias_claims.setdefault(a, set()).add(entity_anchors[i])
+
+    # An event with an anchor (event_anchors[i] is not None -> it cleared the gate)
+    # is a real target, so its name and aliases join the SAME claim pools the
+    # entities use. From here it's just another claimant: Passes 3-4 resolve any
+    # event-vs-entity or event-vs-event clash uniformly (a surface claimed by >1
+    # anchor drops out as ambiguous, and each thing keeps its own anchor). We check
+    # `is not None`, never truthiness -- an anchor is never an empty string, but the
+    # None opt-out is the real signal and we key on it explicitly.
+    for i, ev in enumerate(events):
+        if event_anchors[i] is None:
+            continue                       # gated out -> not a source either
+        s = _nfc(_split_article(ev.name))
+        if s.strip():
+            name_claims.setdefault(s, set()).add(event_anchors[i])
+        for alias in ev.aliases:
+            a = _nfc(_split_article(alias))
+            if a.strip():
+                alias_claims.setdefault(a, set()).add(event_anchors[i])
 
     # --- Pass 3a: name beats alias. --- #
     # If an alias surface equals some entity's real NAME surface, the name wins and
@@ -383,6 +458,7 @@ def build_crosslink_map(noun_entities: list, common_words: Optional[dict] = None
         sources=sources,
         pattern=pattern,
         _lookup=lookup,
+        event_anchors=event_anchors,
     )
 
 
@@ -459,11 +535,13 @@ def add_crosslinks(block: str, crosslink_map: CrosslinkMap, this_anchor: Optiona
     """Weave internal links over ONE rendered block -- an entity page (heading +
     body) or a single history-event description.
 
-    `this_anchor` is the page's own anchor, pre-seeded into `seen` so the entity is
-    never linked to its own page; pass None for a history-event description (it is
-    not a target, so there's nothing to self-suppress). The `seen` set is fresh per
-    call, so each entity page is its own little article: first-mention-per-article,
-    reset on the next block.
+    `this_anchor` is the block's own anchor, pre-seeded into `seen` so the page is
+    never linked to itself. For a history-event description, pass the event's own
+    anchor from `event_anchors` when it has one -- an anchored event IS a target,
+    and its own description must not link back to it -- and None only for a
+    gated-out event (no anchor -> not a target -> nothing to self-suppress). The
+    `seen` set is fresh per call, so each page is its own little article:
+    first-mention-per-article, reset on the next block.
     """
     # Empty block or empty pool: nothing to do, return the input untouched (no NFC
     # rewrite either, so it's byte-identical).

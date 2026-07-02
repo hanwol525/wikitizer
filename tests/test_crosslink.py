@@ -58,6 +58,13 @@ def event(name, description, aliases=None):
     return HistoryEvent(name=name, description=description, scope=Scope.WORLD, aliases=aliases or [])
 
 
+def hev(name, aliases=None):
+    # Same move as tests/test_reconciler.py's hev: the required description + scope
+    # get simple filler, because the crosslink map only ever reads name + aliases.
+    return HistoryEvent(name=name, description=f"{name} happened.", scope=Scope.WORLD,
+                        aliases=aliases or [])
+
+
 def surfaces(cmap):
     """Just the surface strings in the resolved pool (drop the anchors)."""
     return [s for s, _ in cmap.sources]
@@ -520,3 +527,80 @@ def test_load_crosslink_words_reads_file(tmp_path):
     p = tmp_path / "words.json"
     p.write_text('{"require_article": ["Founding"], "never_link": ["Pond"]}', encoding="utf-8")
     assert load_crosslink_words(str(p)) == {"require_article": ["Founding"], "never_link": ["Pond"]}
+
+
+# --- Phase 4.4 Brief 1: events as crosslink targets + sources ---------------
+
+def test_eligible_event_gets_an_anchor():
+    cmap = build_crosslink_map([], events=[hev("The Sundering")])
+    assert cmap.event_anchors == ["the-sundering"]
+
+
+def test_sentence_ish_event_gets_no_anchor_and_no_source():
+    # An extractor fallback name (sentence-shaped) is not a useful link target: no
+    # anchor (None in the parallel list) and nothing in the source pool.
+    long_name = "The party reached the distant gates before nightfall and made camp"
+    cmap = build_crosslink_map([], events=[hev(long_name)])
+    assert cmap.event_anchors == [None]
+    assert surfaces(cmap) == []
+
+
+def test_event_vs_entity_slug_clash_entity_keeps_clean_slug(caplog):
+    # The canonical event-vs-entity collision. The entity is processed first, so it
+    # keeps "riverton"; the event suffixes to "riverton-2". Both keep an anchor; the
+    # shared bare surface drops out of the pool (ambiguous), and it's flagged.
+    with caplog.at_level(logging.WARNING):
+        cmap = build_crosslink_map([loc("Riverton")], events=[hev("Riverton")])
+    assert cmap.entity_anchors == ["riverton"]
+    assert cmap.event_anchors == ["riverton-2"]
+    assert "Riverton" not in surfaces(cmap)          # ambiguous -> no inbound link
+    assert REVIEW_PREFIX in caplog.text
+    # a bare "Riverton" in prose therefore links nowhere
+    assert add_crosslinks("They marched on Riverton at dawn.", cmap, None) \
+        == "They marched on Riverton at dawn."
+
+
+def test_unique_event_name_is_a_linkable_source():
+    # An event colliding with nothing becomes a normal source: a bare mention of it
+    # in other prose turns into a link to the event's anchor.
+    cmap = build_crosslink_map([loc("Lake Mundi")], events=[hev("The Sundering")])
+    out = add_crosslinks("Everything changed after the Sundering.", cmap, None)
+    assert "[Sundering](#the-sundering)" in out
+
+
+def test_event_alias_feeds_the_pool():
+    # Event aliases join the pool as extra surfaces resolving to the event's anchor,
+    # exactly like entity aliases.
+    cmap = build_crosslink_map([], events=[hev("The Sundering", aliases=["The Great Cataclysm"])])
+    out = add_crosslinks("The Great Cataclysm reshaped the coast.", cmap, None)
+    assert "[Great Cataclysm](#the-sundering)" in out
+
+
+def test_event_empty_slug_falls_back_to_event_index(caplog):
+    # A non-sentence-ish name that still slugs to empty ("***" has no sentence
+    # punctuation and is one "word") gets an event-scoped fallback id -- never an
+    # empty id, and never colliding with an entity-<N> fallback.
+    with caplog.at_level(logging.WARNING):
+        cmap = build_crosslink_map([], events=[hev("***")])
+    assert cmap.event_anchors == ["event-0"]
+    assert REVIEW_PREFIX in caplog.text
+
+
+def test_two_events_same_name_both_anchored_shared_surface_dropped(caplog):
+    # event-vs-event identical-name collision: both get their own suffixed anchor,
+    # and the shared surface drops out as ambiguous. Same machinery as the
+    # entity-vs-entity identical-name case, no new code path.
+    with caplog.at_level(logging.WARNING):
+        cmap = build_crosslink_map([], events=[hev("The Battle"), hev("The Battle")])
+    assert cmap.event_anchors == ["the-battle", "the-battle-2"]
+    assert "Battle" not in surfaces(cmap)
+    assert REVIEW_PREFIX in caplog.text
+
+
+def test_no_events_arg_behaves_exactly_as_before():
+    # Backward-compat: omitting events leaves event_anchors empty and changes nothing
+    # about entity behavior. Pins that the new parameter is optional and inert.
+    cmap = build_crosslink_map([loc("Riverton")])
+    assert cmap.event_anchors == []
+    assert cmap.entity_anchors == ["riverton"]
+    assert ("Riverton", "riverton") in cmap.sources
