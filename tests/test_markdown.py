@@ -6,10 +6,19 @@ event_anchors list plus a working add_crosslinks) is pure too, so this whole sui
 runs offline. Every fixture is fabricated synthetic lore; every assertion exact.
 """
 
-from models.lore import HistoryEvent, Location, Quote, Scope
+from models.lore import (
+    Character,
+    HistoryEvent,
+    Item,
+    Location,
+    Organization,
+    PeopleAndCultures,
+    Quote,
+    Scope,
+)
 from renderer.crosslink import build_crosslink_map
 from renderer.footnotes import FootnoteRegistry
-from renderer.markdown import render_history
+from renderer.markdown import render_history, render_wiki
 
 
 # --- tiny builders ---------------------------------------------------------- #
@@ -153,3 +162,132 @@ def test_description_is_crosslinked_and_self_link_suppressed():
     out = render_history(events, cmap, FootnoteRegistry())
     assert "[Lake Mundi](#lake-mundi)" in out          # the noun mention linked
     assert "[Sundering](#the-sundering)" not in out    # self-mention NOT linked
+
+
+# --- Phase 4.4 Brief 3: entity sections + render_wiki -----------------------
+
+def test_entity_renders_as_heading_with_anchor_and_prose_body():
+    loc = Location(name="Rivendell", details=["A hidden valley.", "Home to Elrond."])
+    out = render_wiki([loc], [], [], [], [], [])
+    assert "## Locations" in out
+    assert '### <a id="rivendell"></a>Rivendell' in out
+    assert "A hidden valley. Home to Elrond." in out   # details joined as prose
+
+
+def test_section_order_is_fixed():
+    # The event is DATED (calendar_system set) so the history section renders as
+    # "## History"; an undated-only history would render "## Timeline" (Brief 2's
+    # locked render_history rule), which is a different string than this test pins.
+    out = render_wiki(
+        [Location(name="Bree")], [Character(name="Aragorn")],
+        [hev("The Founding", calendar_system="AR", chronological_position=0)],
+        [Organization(name="Rangers")], [Item(name="Anduril")],
+        [PeopleAndCultures(name="Elves")],
+    )
+    assert (out.index("## Locations") < out.index("## History")
+            < out.index("## People & Cultures") < out.index("## Organizations")
+            < out.index("## Characters") < out.index("## Items"))
+
+
+def test_empty_sections_are_dropped():
+    out = render_wiki([Location(name="Bree")], [], [], [], [], [])
+    assert "## Locations" in out
+    assert "## Characters" not in out
+    assert "## History" not in out
+
+
+def test_empty_world_returns_empty_string():
+    assert render_wiki([], [], [], [], [], []) == ""
+
+
+def test_entities_sorted_alphabetically_within_section():
+    out = render_wiki([Location(name="Zephyr Peak"), Location(name="Ashford")],
+                      [], [], [], [], [])
+    assert out.index("Ashford") < out.index("Zephyr Peak")
+
+
+def test_entity_type_routed_to_correct_section():
+    # A People & Cultures entry must land under People & Cultures, not Characters.
+    out = render_wiki([], [Character(name="Gimli")], [], [], [],
+                      [PeopleAndCultures(name="Dwarves")])
+    people_section = out[out.index("## People & Cultures"):out.index("## Characters")]
+    assert "Dwarves" in people_section          # routed to the right section
+    assert "Gimli" not in people_section
+
+
+def test_entity_anchor_stays_paired_after_type_split_and_sort():
+    # The footgun, entity edition. Concatenation puts the location first, so it keeps
+    # "riverton" and the org suffixes to "riverton-2". Each heading must carry ITS
+    # OWN anchor after the isinstance-split and the alphabetical sort -- not swapped.
+    out = render_wiki([Location(name="Riverton")], [], [],
+                      [Organization(name="Riverton")], [], [])
+    assert '### <a id="riverton"></a>Riverton' in out
+    assert '### <a id="riverton-2"></a>Riverton' in out
+
+
+def test_entity_footnotes_land_at_end_of_body():
+    q = Quote(text="a fact", speaker="M", source_file="g.txt")
+    out = render_wiki([Location(name="Bree", details=["A town."], supporting_quotes=[q])],
+                      [], [], [], [], [])
+    assert "A town.[^1]" in out    # marker at end of body
+    assert "[^1]:" in out          # definition block rendered at the end
+
+
+def test_entity_body_is_crosslinked_and_self_link_suppressed():
+    bree = Location(name="Bree", details=["Bree lies near Rivendell."])
+    rivendell = Location(name="Rivendell", details=["A valley."])
+    out = render_wiki([bree, rivendell], [], [], [], [], [])
+    assert "[Rivendell](#rivendell)" in out    # cross-reference linked
+    assert "[Bree](#bree)" not in out          # own name in own body not linked
+
+
+def test_footnotes_numbered_in_render_order_across_sections():
+    q1 = Quote(text="loc fact", speaker="M", source_file="g.txt")
+    q2 = Quote(text="char fact", speaker="M", source_file="g.txt")
+    out = render_wiki([Location(name="Bree", details=["x"], supporting_quotes=[q1])],
+                      [Character(name="Aragorn", details=["y"], supporting_quotes=[q2])],
+                      [], [], [], [])
+    # Locations render before Characters, so the location's quote is [^1].
+    assert "x[^1]" in out
+    assert "y[^2]" in out
+
+
+def test_history_section_is_included():
+    out = render_wiki([], [], [hev("The Founding", chronological_position=0,
+                                   description="It began.")], [], [], [])
+    assert "## Timeline" in out          # render_history produced its section
+    assert "The Founding" in out
+
+
+def test_entity_with_empty_details_renders_clean_heading_no_trailing_blanks():
+    # A named-but-factless entity (empty details) is a supported extractor output.
+    # It must render as a clean heading with NO empty body paragraph trailing it.
+    out = render_wiki([Location(name="Bree")], [], [], [], [], [])
+    assert out == '## Locations\n\n### <a id="bree"></a>Bree'   # exact: no trailing blank
+    assert "[^" not in out                                     # no stray footnote marker
+
+
+def test_two_empty_details_entities_have_no_triple_blank_gap():
+    out = render_wiki([Location(name="Ashford"), Location(name="Bree")], [], [], [], [], [])
+    assert "\n\n\n" not in out   # exactly one blank line between the two headings
+
+
+def test_empty_details_entity_with_quote_hangs_footnote_on_heading():
+    # With no body, a supporting quote's marker would otherwise float alone on its
+    # own paragraph; instead it hangs on the heading so provenance is kept, cleanly.
+    q = Quote(text="Bree is mentioned", speaker="M", source_file="g.txt")
+    out = render_wiki([Location(name="Bree", supporting_quotes=[q])], [], [], [], [], [])
+    assert '### <a id="bree"></a>Bree[^1]' in out    # marker attached to heading
+    assert "></a>Bree\n\n[^" not in out              # NOT floating on its own paragraph
+    assert "[^1]:" in out                            # definition still rendered
+
+
+def test_entity_heading_anchor_matches_its_own_name_across_types():
+    # Companion to the homonym footgun test above: DISTINCT names couple each
+    # heading's name to its expected anchor, so a pure entity<->anchor swap (which
+    # the same-name test can't detect, since both anchors appear either way) would
+    # mismatch a name with the wrong slug and fail here.
+    out = render_wiki([Location(name="Riverton")], [], [],
+                      [Organization(name="Ironhold")], [], [])
+    assert '### <a id="riverton"></a>Riverton' in out
+    assert '### <a id="ironhold"></a>Ironhold' in out
