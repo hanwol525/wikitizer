@@ -529,6 +529,41 @@ def test_load_crosslink_words_reads_file(tmp_path):
     assert load_crosslink_words(str(p)) == {"require_article": ["Founding"], "never_link": ["Pond"]}
 
 
+# Phase 4.5 Task 1 hardening: a file that PARSES but is the wrong shape must fail
+# loudly, not fall through .get() to a silently-empty (disabled) config.
+
+def test_load_crosslink_words_unknown_key_raises(tmp_path):
+    # A typo'd key ("neverlink") would otherwise disable the never_link protection
+    # with zero warning -- the exact silent trap Task 1 closes.
+    p = tmp_path / "words.json"
+    p.write_text('{"neverlink": ["Pond"]}', encoding="utf-8")
+    with pytest.raises(ValueError):
+        load_crosslink_words(str(p))
+
+
+def test_load_crosslink_words_non_dict_raises(tmp_path):
+    # Parses fine, but a bare JSON array is the wrong shape -- reject it rather than
+    # treat it as an empty config.
+    p = tmp_path / "words.json"
+    p.write_text("[]", encoding="utf-8")
+    with pytest.raises(ValueError):
+        load_crosslink_words(str(p))
+
+
+def test_load_crosslink_words_only_one_key_is_valid(tmp_path):
+    # A recognized subset is fine: the absent key just defaults to empty.
+    p = tmp_path / "words.json"
+    p.write_text('{"never_link": ["Pond"]}', encoding="utf-8")
+    assert load_crosslink_words(str(p)) == {"require_article": [], "never_link": ["Pond"]}
+
+
+def test_load_crosslink_words_empty_object_is_valid(tmp_path):
+    # An empty object is a legitimate "no common words" config, not an error.
+    p = tmp_path / "words.json"
+    p.write_text("{}", encoding="utf-8")
+    assert load_crosslink_words(str(p)) == {"require_article": [], "never_link": []}
+
+
 # --- Phase 4.4 Brief 1: events as crosslink targets + sources ---------------
 
 def test_eligible_event_gets_an_anchor():

@@ -249,13 +249,31 @@ def load_crosslink_words(path: str = DEFAULT_WORDS_PATH) -> dict:
 
     Unlike the speaker-map loader, a MISSING file is not an error: both lists
     default empty so a fresh clone with no config behaves exactly like an empty
-    config. A malformed JSON file still raises (a typo'd config is worth surfacing,
-    not silently swallowing)."""
+    config. A malformed JSON file still raises -- and so does a file that PARSES
+    but is the wrong shape (a non-dict, or a typo'd key like "neverlink" that
+    would otherwise fall through .get() to an empty default and silently disable
+    the config). A typo'd config is worth surfacing, not silently swallowing."""
     try:
         with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)
     except FileNotFoundError:
         return {"require_article": [], "never_link": []}
+
+    # A file that PARSED but is the wrong shape is a silent trap. A non-dict, or a
+    # typo'd key like "neverlink", would otherwise fall through .get() to an empty
+    # default and quietly disable the config with no warning. Catch it loudly.
+    if not isinstance(data, dict):
+        raise ValueError(
+            f"crosslink_words.json must be a JSON object, got {type(data).__name__}."
+        )
+    known = {"require_article", "never_link"}
+    unknown = set(data) - known
+    if unknown:
+        raise ValueError(
+            f"crosslink_words.json has unrecognized key(s): {sorted(unknown)}. "
+            f"Expected only {sorted(known)} — check for a typo."
+        )
+
     return {
         "require_article": list(data.get("require_article", [])),
         "never_link": list(data.get("never_link", [])),

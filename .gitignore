@@ -228,3 +228,7 @@ tests/fixtures/real_messages.py
 tests/output/
 phase-3.10-test-messages.md
 config/speaker_map.json
+
+# Phase 4.5 orchestrator output: a real-log wiki embeds verbatim quotes and real
+# speaker names (PII), same privacy class as logs/ and tests/output/. Keep local.
+output/
