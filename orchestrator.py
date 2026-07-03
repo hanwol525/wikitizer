@@ -1,0 +1,191 @@
+"""Phase 4.5: the pipeline orchestrator -- the traffic cop that runs every stage
+in order, hands each stage's output to the next, and keeps the run alive when a
+non-critical agent fails. It does NO LLM work of its own; all the clever stuff
+lives in the agents. Its job is sequencing, parallelism, and error policy.
+
+The error policy in one line: every stage DEGRADES (log loudly, substitute a
+safe fallback, keep going) EXCEPT the noise filter, which is the sole hard-stop.
+That mirrors the "degrade toward less-complete, never corrupt" spirit the
+reconciler's timeline weave already follows -- an incomplete wiki beats a fake one.
+"""
+
+import logging
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
+
+import anthropic
+
+from models.message import Message
+from parsers.chat_parser import parse_chat_log
+from parsers.reaction_filter import filter_reactions
+from agents.noise_filter import NoiseFilterAgent, select_for_extraction
+from agents.locations_extractor import LocationsExtractor
+from agents.characters_extractor import CharactersExtractor
+from agents.history_extractor import HistoryExtractor
+from agents.organization_extractor import OrganizationExtractor
+from agents.item_extractor import ItemExtractor
+from agents.people_and_cultures_extractor import PeopleAndCulturesExtractor
+from agents.reconciler import Reconciler
+from renderer.markdown import render_wiki
+
+logger = logging.getLogger(__name__)
+
+# Same convention as the agents/renderer: every loud, human-actionable flag
+# carries this prefix so the Phase 5 review pass can funnel them out of routine
+# log noise. Only the degrade-and-continue logs use it -- an abort (a crash) is
+# unmissable on its own and doesn't need flagging.
+REVIEW_PREFIX = "[REVIEW]"
+
+
+@dataclass
+class PipelineConfig:
+    """Everything the pipeline needs to run, loaded ONCE by main.py before any
+    agent is built -- so a broken config fails fast, before any paid LLM call.
+
+    speaker_map / crosslink_words arrive already-loaded (plain dicts), not paths,
+    so the orchestrator does no config-file I/O and tests can build a config inline
+    with nothing on disk. max_workers caps the extractor fan-out (also the natural
+    rate-limit throttle; dial down if you ever hit 429s).
+    """
+    speaker_map: dict[str, str]
+    crosslink_words: dict
+    max_workers: int = 6
+
+
+class Orchestrator:
+    """Runs the whole ingest-to-wiki pipeline. Build once, call run().
+
+    `client` is the single shared Anthropic client, injected so tests can pass a
+    fake and never hit the network. In production it's None and we build one real
+    client (with the SDK's own 3x transient-HTTP retry) that every agent shares.
+    """
+
+    def __init__(self, client=None):
+        # Injected client wins (tests pass a fake); else build ONE real shared
+        # client. max_retries=3 is the SDK's transient-HTTP retry, set once for the
+        # whole run. The API key is read by the SDK from the environment (main.py's
+        # load_dotenv put it there) -- we never read or store the key here.
+        self.client = client if client is not None else anthropic.Anthropic(max_retries=3)
+
+    def _build_agents(self, config: PipelineConfig):
+        """Construct every agent, all sharing self.client. Its own method so a test
+        can subclass and swap in stub agents to exercise sequencing/error-handling
+        without any real Claude calls.
+
+        Only the model varies between agents, and that's set INSIDE each agent (the
+        noise filter self-selects Haiku; the extractors/reconciler keep BaseAgent's
+        Sonnet default) -- so here we only pass the shared client.
+        """
+        noise_filter = NoiseFilterAgent(client=self.client)
+        # The characters extractor needs the real player names so table-talk about a
+        # real person ("Sam, you free Thursday?") isn't minted as a character. The
+        # roster is the speaker map's VALUES (every real person, incl. the exporter).
+        extractors = {
+            "locations": LocationsExtractor(client=self.client),
+            "characters": CharactersExtractor(
+                client=self.client,
+                player_names=list(config.speaker_map.values()),
+            ),
+            "history": HistoryExtractor(client=self.client),
+            "organizations": OrganizationExtractor(client=self.client),
+            "items": ItemExtractor(client=self.client),
+            "people": PeopleAndCulturesExtractor(client=self.client),
+        }
+        reconciler = Reconciler(client=self.client)
+        return noise_filter, extractors, reconciler
+
+    def run(self, files, config: PipelineConfig) -> str:
+        """Walk the full pipeline and return the finished wiki markdown.
+
+        parse+filter each file -> concat -> noise-filter -> select ->
+        extract (6 in parallel) -> reconcile per type + order_history -> render.
+        """
+        # --- 1. Parse + reaction-filter every file, concatenate in pass-order. ---
+        # Pure Python, no LLM, so it's cheap and sequential. A parse failure is left
+        # to RAISE (abort): it's before any paid call, and silently skipping a file
+        # the caller asked for would mean silently-missing lore. source_file rides on
+        # every Message, so concatenating loses no provenance (4.6 exclusion needs it).
+        all_messages: list[Message] = []
+        for filepath in files:
+            parsed = parse_chat_log(filepath, config.speaker_map)
+            all_messages.extend(filter_reactions(parsed))
+
+        if not all_messages:
+            logger.warning("No messages parsed from %d file(s); wiki will be empty.", len(files))
+            # render_wiki returns "" for an empty world, so we let it fall through.
+
+        noise_filter, extractors, reconciler = self._build_agents(config)
+
+        # --- 2. Noise filter -> select. This is the ONE hard-stop. ---
+        # The noise filter is the funnel the whole rest of the pipeline eats. Content
+        # failures are already contained inside it (labeled 'ambiguous'); only a
+        # sustained HTTP failure reaches us. The only way to "continue" past a dead
+        # noise filter is to send the whole UNFILTERED chat to the six Sonnet
+        # extractors, which quietly multiplies the bill ~6x on a run that's probably
+        # already broken. So we log with context and abort.
+        try:
+            classified = noise_filter.classify(all_messages)
+        except Exception as exc:
+            logger.error("Noise filter failed; aborting run. %s", exc)
+            raise
+        filtered = select_for_extraction(classified)
+
+        # --- 3. Extract: six agents in parallel over the same filtered list. ---
+        # Threads (not processes) because each extractor is mostly WAITING on the
+        # network -- the case threads speed up -- and they share nothing but the
+        # thread-safe client. future.result() re-raises whatever blew up inside the
+        # thread, so a dead extractor is caught HERE and DEGRADES: log it loudly and
+        # drop just that one section, keeping the rest of the wiki.
+        extracted: dict[str, list] = {}
+        with ThreadPoolExecutor(max_workers=config.max_workers) as pool:
+            futures = {
+                lore_type: pool.submit(ext.extract, filtered)
+                for lore_type, ext in extractors.items()
+            }
+            for lore_type, future in futures.items():
+                try:
+                    extracted[lore_type] = future.result()
+                except Exception as exc:
+                    logger.error(
+                        "%s %s extractor failed; omitting that section. %s",
+                        REVIEW_PREFIX, lore_type, exc,
+                    )
+                    extracted[lore_type] = []
+
+        # --- 4. Reconcile each type, then order the history timeline. ---
+        # Both DEGRADE on failure (not hard-stops): a failed reconcile falls back to
+        # the un-reconciled list (duplicate pages -- the harmless under-merge direction
+        # the reconciler itself already takes on a JSON failure), and a failed
+        # order_history leaves the events unordered so they render under "Could Not
+        # Place" (exactly what _weave_and_stamp already produces internally).
+        reconciled: dict[str, list] = {}
+        for lore_type, entries in extracted.items():
+            try:
+                reconciled[lore_type] = reconciler.reconcile(entries)
+            except Exception as exc:
+                logger.error(
+                    "%s %s reconcile failed; using un-reconciled entries. %s",
+                    REVIEW_PREFIX, lore_type, exc,
+                )
+                reconciled[lore_type] = entries
+
+        events = reconciled["history"]
+        try:
+            events = reconciler.order_history(events)
+        except Exception as exc:
+            logger.error(
+                "%s order_history failed; history will render under "
+                "'Could Not Place'. %s", REVIEW_PREFIX, exc,
+            )
+            # leave `events` as the reconciled-but-unordered list (timeline fields None)
+
+        # --- 5. Render the whole wiki and return it. Writing to disk is main.py's job. ---
+        return render_wiki(
+            locations=reconciled["locations"],
+            characters=reconciled["characters"],
+            events=events,
+            organizations=reconciled["organizations"],
+            items=reconciled["items"],
+            people=reconciled["people"],
+            common_words=config.crosslink_words,
+        )
