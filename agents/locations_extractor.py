@@ -35,7 +35,7 @@ from typing import Optional
 from pydantic import ValidationError
 
 from agents.base_extractor import BaseExtractor
-from models.lore import Location
+from models.lore import Detail, Location
 from models.message import Message
 
 logger = logging.getLogger(__name__)
@@ -128,7 +128,7 @@ class LocationsExtractor(BaseExtractor):
                 # _resolve_quote already logged the specific reason (bad id /
                 # not verbatim); dropping the whole detail without re-logging.
                 continue
-            details_out.append(detail_text)
+            details_out.append(Detail(text=detail_text, source_files=[q.source_file]))
             # Dedup identical quotes within this one entry. pydantic v2 compares
             # models by field value, so ``in`` works on Quote instances.
             if q not in quotes_out:

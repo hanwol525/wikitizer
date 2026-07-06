@@ -26,13 +26,17 @@ from pathlib import Path
 
 import pytest
 
-from models.lore import Location, Character, HistoryEvent, Quote
+from models.lore import Location, Character, HistoryEvent, Quote, Detail
 from agents.reconciler import Reconciler
 
 try:
     from tests.eyeball import format_entities
 except ImportError:  # eyeball is committed, but stay robust to a partial checkout
     format_entities = None
+
+
+def det(text, *source_files):
+    return Detail(text=text, source_files=list(source_files))
 
 
 pytestmark = [
@@ -71,10 +75,10 @@ def test_reconciler_merges_typo_but_not_one_letter_siblings():
     # of merging -- so the fixture now matches its own "nothing distinguishes them"
     # premise, leaving only the spelling typo. Two source_files still exercise the
     # cross-source quote merge.)
-    maltaav = Location(name="Maltaav", details=["a coastal trading city"],
+    maltaav = Location(name="Maltaav", details=[det("a coastal trading city", "session1.txt")],
                        supporting_quotes=[Quote(text="we sailed into Maltaav",
                                                 speaker="dm", source_file="session1.txt")])
-    maltraav = Location(name="Maltraav", details=["a city on the coast"],
+    maltraav = Location(name="Maltraav", details=[det("a city on the coast", "session2.txt")],
                         supporting_quotes=[Quote(text="back at the docks in Maltraav",
                                                  speaker="dm", source_file="session2.txt")])
     merged_places = rec.reconcile([maltaav, maltraav])
@@ -83,10 +87,10 @@ def test_reconciler_merges_typo_but_not_one_letter_siblings():
 
     # Sibling case: one letter off but explicitly different people -> DO NOT MERGE.
     cj = Character(name="CJ", is_pc=True, player_name="Hannah",
-                   details=["has a sister named DJ"],
+                   details=[det("has a sister named DJ", "dndgroup.txt")],
                    supporting_quotes=[Quote(text="CJ's sister is DJ",
                                             speaker="player_a", source_file="dndgroup.txt")])
-    dj = Character(name="DJ", details=["CJ's sister"],
+    dj = Character(name="DJ", details=[det("CJ's sister", "dndgroup.txt")],
                    supporting_quotes=[Quote(text="DJ, CJ's sister, joined us",
                                             speaker="player_a", source_file="dndgroup.txt")])
     result = rec.reconcile([cj, dj])

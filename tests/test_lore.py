@@ -1,9 +1,40 @@
 import pytest
 from pydantic import ValidationError
 from models.lore import (
-    Quote, Location, Character, HistoryEvent, Scope,
+    Quote, Detail, Location, Character, HistoryEvent, Scope,
     Organization, Item, PeopleAndCultures,
 )
+
+
+def det(text, *source_files):
+    return Detail(text=text, source_files=list(source_files))
+
+
+# --- Detail: the fact-grain provenance twin of Quote -------------------------
+
+def test_detail_defaults_to_no_sources():
+    assert Detail(text="x").source_files == []
+
+
+def test_detail_round_trips_through_json_preserving_source_order():
+    d = Detail(text="x", source_files=["a.txt", "b.txt"])
+    again = Detail.model_validate_json(d.model_dump_json())
+    assert again == d
+    assert again.source_files == ["a.txt", "b.txt"]   # order preserved
+
+
+def test_two_details_dont_share_a_source_files_list():
+    # Same default_factory guard the other models get: independent list objects.
+    a = Detail(text="x")
+    b = Detail(text="x")
+    a.source_files.append("a.txt")
+    assert b.source_files == []
+
+
+def test_entity_details_reject_bare_strings():
+    # The retype bites: `details` must be Detail objects now, not plain strings.
+    with pytest.raises(ValidationError):
+        Location(name="Lake Mundi", details=["a bare string"])
 
 
 def test_quote_builds_with_all_fields():
@@ -19,7 +50,7 @@ def test_location_with_quotes():
     loc = Location(
         name="Lake Mundi",
         aliases=["The Great Well", "The Pond"],
-        details=["A massive central lake divided into three rings."],
+        details=[det("A massive central lake divided into three rings.")],
         supporting_quotes=[
             Quote(text="The Great Well. The Pond. Lake Mundi.",
                   speaker="Matt", source_file="dndgroup.txt")
@@ -156,7 +187,7 @@ def test_typed_lore_defaults(Model):
 
 @pytest.mark.parametrize("Model", [Organization, Item, PeopleAndCultures])
 def test_typed_lore_round_trips(Model):
-    obj = Model(name="Test", aliases=["alt"], details=["a fact"])
+    obj = Model(name="Test", aliases=["alt"], details=[det("a fact")])
     assert obj.name == "Test" and obj.aliases == ["alt"]
 
 

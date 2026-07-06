@@ -19,10 +19,34 @@ class Quote(BaseModel):
     speaker: str
     source_file: str
 
+
+class Detail(BaseModel):
+    """One extracted fact about an entity, plus where it came from.
+
+    The fact-grain twin of ``Quote``. ``text`` is the fact itself -- exactly the
+    string that used to live bare in ``details: list[str]`` -- and ``source_files``
+    records which chat-log file(s) that fact was stated in.
+
+    ``source_files`` is a LIST on purpose, even though a freshly-extracted fact
+    always has exactly one source. When the reconciler merges two mentions of the
+    same entity and finds the SAME fact stated in two different files (say a public
+    log and a confidential one), it collapses them into one ``Detail`` -- and that
+    survivor has to remember it came from BOTH, so a future exclusion pass drops it
+    only when EVERY one of its sources is excluded. A single string couldn't say
+    "this fact is public AND secret".
+
+    Nothing reads ``source_files`` yet -- it's dormant plumbing for ``--exclude-
+    sources``. Rendering ignores it and uses only ``text``, which is why adding it
+    changes nothing you can see in the wiki.
+    """
+    text: str
+    source_files: list[str] = Field(default_factory=list)
+
+
 class Location(BaseModel):
     name: str
     aliases: list[str] = Field(default_factory=list)
-    details: list[str] = Field(default_factory=list)
+    details: list[Detail] = Field(default_factory=list)
     supporting_quotes: list[Quote] = Field(default_factory=list)
 
 class Character(BaseModel):
@@ -30,7 +54,7 @@ class Character(BaseModel):
     aliases: list[str] = Field(default_factory=list)
     is_pc: bool = False
     player_name: Optional[str] = None
-    details: list[str] = Field(default_factory=list)
+    details: list[Detail] = Field(default_factory=list)
     supporting_quotes: list[Quote] = Field(default_factory=list)
 
 class HistoryEvent(BaseModel):
@@ -68,13 +92,13 @@ class HistoryEvent(BaseModel):
 class Organization(BaseModel):
     name: str
     aliases: list[str] = Field(default_factory=list)
-    details: list[str] = Field(default_factory=list)
+    details: list[Detail] = Field(default_factory=list)
     supporting_quotes: list[Quote] = Field(default_factory=list)
 
 class Item(BaseModel):
     name: str
     aliases: list[str] = Field(default_factory=list)
-    details: list[str] = Field(default_factory=list)
+    details: list[Detail] = Field(default_factory=list)
     supporting_quotes: list[Quote] = Field(default_factory=list)
 
 # PascalCase identifier; the pretty "People & Cultures" display label lives in
@@ -82,5 +106,5 @@ class Item(BaseModel):
 class PeopleAndCultures(BaseModel):
     name: str
     aliases: list[str] = Field(default_factory=list)
-    details: list[str] = Field(default_factory=list)
+    details: list[Detail] = Field(default_factory=list)
     supporting_quotes: list[Quote] = Field(default_factory=list)

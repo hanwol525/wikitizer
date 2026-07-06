@@ -129,6 +129,48 @@ def _dedup_quotes(quotes):
     return out
 
 
+def _dedup_details(details):
+    """Collapse Details that state the same fact into one, unioning their sources.
+
+    Replaces the old ``_dedup_preserve_order`` call for details now that details are
+    ``Detail`` objects, not strings. On the VISIBLE axis it behaves identically to
+    the old string de-dup -- key on the stripped ``text`` (so a subtly-different fact
+    is never eaten), keep the first-seen ``Detail`` verbatim, preserve order -- so
+    the rendered wiki is byte-for-byte unchanged. The new, invisible part: when the
+    same fact arrives from two files, the survivor keeps the ORDERED UNION of every
+    file it came from, so the future exclusion pass strips it only when ALL its
+    sources are excluded (the same rule the whole-entity case already uses).
+
+    Never mutates an input Detail: a union produces a fresh Detail via model_copy.
+    """
+    by_key = {}   # stripped text -> surviving Detail (source_files accumulated)
+    order = []    # stripped keys, in first-seen order
+    for d in details:
+        key = d.text.strip()
+        if key in by_key:
+            survivor = by_key[key]
+            merged = _dedup_preserve_order(survivor.source_files + d.source_files)
+            by_key[key] = survivor.model_copy(update={"source_files": merged})
+        else:
+            by_key[key] = d
+            order.append(key)
+    return [by_key[k] for k in order]
+
+
+def _entity_for_prompt(entry):
+    """Serialise an entry the way the reconciler LLM has ALWAYS seen it: details as
+    bare text strings, with no ``source_files`` tag. The provenance tags are new
+    plumbing the LLM never saw before, so we strip them back out here to keep the
+    merge prompt byte-identical -- which keeps Claude's merge decisions from shifting
+    AND keeps the prompt cache hitting. HistoryEvent has no ``details``, so the guard
+    makes this a no-op for it.
+    """
+    data = entry.model_dump(mode="json")
+    if "details" in data:
+        data = {**data, "details": [d["text"] for d in data["details"]]}
+    return data
+
+
 def _resolve_scope(scopes):
     """Broadest scope wins. Matches the History extractor's 'default to world'
     philosophy: a too-broad event is loud (front-of-wiki) and gets corrected; a
@@ -285,10 +327,13 @@ def _combine_group(members, canonical):
         )
 
     # everyone else has a `details` list: concat + exact-dupe-only removal.
+    # `_dedup_details` collapses same-text Details (visible behaviour identical to
+    # the old string de-dup) while unioning their source_files (the invisible
+    # provenance axis for --exclude-sources).
     details = []
     for m in members:
         details.extend(m.details)
-    details = _dedup_preserve_order(details)
+    details = _dedup_details(details)
 
     # Characters carry two scalars to resolve; the other three types don't.
     if isinstance(members[0], Character):
@@ -733,7 +778,7 @@ class Reconciler(BaseAgent):
             f"index in [brackets], counting from 0.\n"
         ]
         for i, e in enumerate(entries):
-            lines.append(f"[{i}] {json.dumps(e.model_dump(mode='json'), ensure_ascii=False)}")
+            lines.append(f"[{i}] {json.dumps(_entity_for_prompt(e), ensure_ascii=False)}")
         return "\n".join(lines)
 
     def _parse_decision(self, raw):

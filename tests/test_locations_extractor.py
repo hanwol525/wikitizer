@@ -144,9 +144,9 @@ def test_extract_happy_path_single_batch():
     assert client.call_count == 1
     assert [loc.name for loc in result] == ["Lake Mundi", "Cloud Mountains"]
     assert result[0].aliases == ["The Great Well", "The Pond"]
-    assert result[0].details == ["A massive central lake divided into three rings"]
+    assert [d.text for d in result[0].details] == ["A massive central lake divided into three rings"]
     assert result[1].aliases == []
-    assert result[1].details == [
+    assert [d.text for d in result[1].details] == [
         "Countries to their southeast are controlled by the Krieger Imperium"
     ]
     # one supporting quote each, matching its source message verbatim -> kept
@@ -252,7 +252,7 @@ def test_verbatim_check_drops_non_matching_quote_keeps_siblings(caplog):
         result = agent.extract(messages)
 
     assert len(result) == 1
-    assert result[0].details == ["A massive central lake"]   # only the good one
+    assert [d.text for d in result[0].details] == ["A massive central lake"]   # only the good one
     assert len(result[0].supporting_quotes) == 1
     assert any(
         "verbatim" in r.getMessage() and "id 0" in r.getMessage()
@@ -278,7 +278,7 @@ def test_verbatim_check_tolerates_multiline_message():
     result = agent.extract(messages)
 
     assert len(result) == 1
-    assert result[0].details == ["A central lake"]
+    assert [d.text for d in result[0].details] == ["A central lake"]
     assert result[0].supporting_quotes[0].text == flat_quote  # stored as given
 
 
@@ -300,7 +300,7 @@ def test_verify_quotes_false_keeps_non_matching_quote():
     result = agent.extract(messages)
 
     assert len(result) == 1
-    assert result[0].details == ["Invented fact"]            # kept, check disabled
+    assert [d.text for d in result[0].details] == ["Invented fact"]            # kept, check disabled
     assert result[0].supporting_quotes[0].text == "totally invented text not in the message"
 
 
@@ -325,7 +325,7 @@ def test_verbatim_check_drops_empty_quote(caplog):
         result = agent.extract(messages)
 
     assert len(result) == 1
-    assert result[0].details == ["It is huge"]               # the fabricated one is gone
+    assert [d.text for d in result[0].details] == ["It is huge"]               # the fabricated one is gone
     assert all(q.text for q in result[0].supporting_quotes)  # no empty-text quote stored
 
 
@@ -348,7 +348,10 @@ def test_identical_quotes_deduped_but_details_kept():
     result = agent.extract(messages)
 
     assert len(result) == 1
-    assert result[0].details == ["It is huge", "Notably large"]  # details NOT deduped
+    assert [d.text for d in result[0].details] == ["It is huge", "Notably large"]  # details NOT deduped
+    # each fact is tagged with the file of the message it cited (dormant provenance)
+    assert result[0].details[0].source_files == [messages[0].source_file]
+    assert result[0].details[1].source_files == [messages[0].source_file]
     assert len(result[0].supporting_quotes) == 1                  # identical quote deduped
 
 
@@ -414,7 +417,7 @@ def test_non_list_details_coerced_to_empty_no_crash(caplog):
         result = agent.extract(messages)
 
     assert [loc.name for loc in result] == ["Gol"]
-    assert result[0].details == []
+    assert [d.text for d in result[0].details] == []
     assert result[0].supporting_quotes == []
     assert any(
         "non-list" in r.getMessage()
@@ -445,7 +448,7 @@ def test_detail_with_non_string_detail_or_quote_dropped(caplog):
         result = agent.extract(messages)
 
     assert len(result) == 1
-    assert result[0].details == ["It is huge"]   # only the well-formed detail
+    assert [d.text for d in result[0].details] == ["It is huge"]   # only the well-formed detail
     assert any(
         "missing a string" in r.getMessage()
         for r in caplog.records
@@ -488,7 +491,7 @@ def test_out_of_range_source_id_dropped_other_details_kept(caplog):
         result = agent.extract(messages)
 
     assert len(result) == 1
-    assert result[0].details == ["It is huge"]   # the in-range detail survives
+    assert [d.text for d in result[0].details] == ["It is huge"]   # the in-range detail survives
     assert any(
         "out of range" in r.getMessage() and "5" in r.getMessage()
         for r in caplog.records
@@ -517,7 +520,7 @@ def test_bool_source_id_dropped_never_indexed_as_0_or_1(caplog):
     assert len(result) == 1
     # Named but no surviving detail -> empty details/quotes, NOT a wrong attachment.
     assert result[0].name == "Lake Mundi"
-    assert result[0].details == []
+    assert [d.text for d in result[0].details] == []
     assert result[0].supporting_quotes == []
     assert any(
         "non-integer source_id" in r.getMessage()

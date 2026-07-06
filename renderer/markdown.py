@@ -184,7 +184,7 @@ def _render_entity(entity, anchor: str, cmap: CrosslinkMap,
     # paragraph is ONE cross-link block, with the entity's own anchor as
     # `this_anchor`, so a mention of the entity's own name inside its body doesn't
     # link back to itself.
-    body = add_crosslinks(" ".join(entity.details), cmap, anchor)
+    body = add_crosslinks(" ".join(d.text for d in entity.details), cmap, anchor)
 
     # Footnote markers for the entity's quote pool, appended at the end of the body.
     refs = "".join(f"[^{registry.add(q)}]" for q in entity.supporting_quotes)

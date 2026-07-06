@@ -32,7 +32,7 @@ from typing import Optional
 from pydantic import ValidationError
 
 from agents.base_extractor import BaseExtractor
-from models.lore import Item
+from models.lore import Detail, Item
 from models.message import Message
 
 logger = logging.getLogger(__name__)
@@ -123,7 +123,7 @@ class ItemExtractor(BaseExtractor):
             q = self._resolve_quote(quote_text, d.get("source_id"), batch)
             if q is None:                       # _resolve_quote already logged why
                 continue
-            details_out.append(detail_text)
+            details_out.append(Detail(text=detail_text, source_files=[q.source_file]))
             if q not in quotes_out:             # dedup identical quotes within this entry
                 quotes_out.append(q)
 
@@ -131,10 +131,10 @@ class ItemExtractor(BaseExtractor):
         name = raw.get("name")
         if not isinstance(name, str) or not name.strip():
             if details_out:
-                name = details_out[0][:80]
+                name = details_out[0].text[:80]
                 logger.warning(
                     "Item has no usable name; using a short form of its first detail as the "
-                    "name. first detail=%r", details_out[0],
+                    "name. first detail=%r", details_out[0].text,
                 )
             else:
                 logger.warning(

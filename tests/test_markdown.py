@@ -8,6 +8,7 @@ runs offline. Every fixture is fabricated synthetic lore; every assertion exact.
 
 from models.lore import (
     Character,
+    Detail,
     HistoryEvent,
     Item,
     Location,
@@ -43,6 +44,13 @@ def hev(name, description="An event happened.", calendar_system=None,
 def loc(name, aliases=None):
     # A minimal Location, same as test_crosslink.py's builder.
     return Location(name=name, aliases=aliases or [])
+
+
+def det(text, *source_files):
+    # details are Detail objects now; tests that don't care about provenance just
+    # wrap the bare string. The rendered wiki reads only d.text, so migrating a
+    # fixture to det(...) leaves the output assertions byte-for-byte unchanged.
+    return Detail(text=text, source_files=list(source_files))
 
 
 def test_no_events_returns_empty_string():
@@ -167,7 +175,7 @@ def test_description_is_crosslinked_and_self_link_suppressed():
 # --- Phase 4.4 Brief 3: entity sections + render_wiki -----------------------
 
 def test_entity_renders_as_heading_with_anchor_and_prose_body():
-    loc = Location(name="Rivendell", details=["A hidden valley.", "Home to Elrond."])
+    loc = Location(name="Rivendell", details=[det("A hidden valley."), det("Home to Elrond.")])
     out = render_wiki([loc], [], [], [], [], [])
     assert "## Locations" in out
     assert '### <a id="rivendell"></a>Rivendell' in out
@@ -227,15 +235,15 @@ def test_entity_anchor_stays_paired_after_type_split_and_sort():
 
 def test_entity_footnotes_land_at_end_of_body():
     q = Quote(text="a fact", speaker="M", source_file="g.txt")
-    out = render_wiki([Location(name="Bree", details=["A town."], supporting_quotes=[q])],
+    out = render_wiki([Location(name="Bree", details=[det("A town.")], supporting_quotes=[q])],
                       [], [], [], [], [])
     assert "A town.[^1]" in out    # marker at end of body
     assert "[^1]:" in out          # definition block rendered at the end
 
 
 def test_entity_body_is_crosslinked_and_self_link_suppressed():
-    bree = Location(name="Bree", details=["Bree lies near Rivendell."])
-    rivendell = Location(name="Rivendell", details=["A valley."])
+    bree = Location(name="Bree", details=[det("Bree lies near Rivendell.")])
+    rivendell = Location(name="Rivendell", details=[det("A valley.")])
     out = render_wiki([bree, rivendell], [], [], [], [], [])
     assert "[Rivendell](#rivendell)" in out    # cross-reference linked
     assert "[Bree](#bree)" not in out          # own name in own body not linked
@@ -244,8 +252,8 @@ def test_entity_body_is_crosslinked_and_self_link_suppressed():
 def test_footnotes_numbered_in_render_order_across_sections():
     q1 = Quote(text="loc fact", speaker="M", source_file="g.txt")
     q2 = Quote(text="char fact", speaker="M", source_file="g.txt")
-    out = render_wiki([Location(name="Bree", details=["x"], supporting_quotes=[q1])],
-                      [Character(name="Aragorn", details=["y"], supporting_quotes=[q2])],
+    out = render_wiki([Location(name="Bree", details=[det("x")], supporting_quotes=[q1])],
+                      [Character(name="Aragorn", details=[det("y")], supporting_quotes=[q2])],
                       [], [], [], [])
     # Locations render before Characters, so the location's quote is [^1].
     assert "x[^1]" in out

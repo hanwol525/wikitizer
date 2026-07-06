@@ -124,10 +124,14 @@ def test_happy_path_pc_and_npc():
     assert kriggy.is_pc is True
     assert kriggy.player_name == "Sam"
     assert kriggy.aliases == []
-    assert kriggy.details == [
+    assert [d.text for d in kriggy.details] == [
         "The disgraced son of a noble house",
         "Younger brother of Emperor Tiberius",
     ]
+    # each fact is tagged with the file of the message it cited (details[0] cited
+    # message 1, details[1] cited message 3) -- dormant provenance for exclude-sources
+    assert kriggy.details[0].source_files == [messages[1].source_file]
+    assert kriggy.details[1].source_files == [messages[3].source_file]
     # the PC's supporting quote carries speaker/source_file from its message
     q0 = kriggy.supporting_quotes[0]
     assert isinstance(q0, Quote)
@@ -337,7 +341,7 @@ def test_detail_loop_guards_drop_malformed_details_without_crashing(caplog):
     with caplog.at_level(logging.WARNING, logger="agents.characters_extractor"):
         res = agent.extract(messages)
     assert res[0].name == "Tiberius"
-    assert res[0].details == []
+    assert [d.text for d in res[0].details] == []
     assert any("non-list" in r.getMessage() for r in caplog.records)
 
     # malformed details mixed with a valid one: a non-dict detail and a non-str
@@ -352,7 +356,7 @@ def test_detail_loop_guards_drop_malformed_details_without_crashing(caplog):
     ])
     agent = make_agent([mixed], player_names={"Sam"})
     res = agent.extract(messages)
-    assert res[0].details == ["The disgraced son of a noble house"]
+    assert [d.text for d in res[0].details] == ["The disgraced son of a noble house"]
 
 
 # --- roster threading into the prompt ---------------------------------------

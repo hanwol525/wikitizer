@@ -30,6 +30,7 @@ import orchestrator
 from orchestrator import Orchestrator, PipelineConfig
 from models.lore import (
     Character,
+    Detail,
     HistoryEvent,
     Item,
     Location,
@@ -52,6 +53,10 @@ def hev(name, description):
     """A minimal HistoryEvent: `scope` is required; the timeline fields default to
     None (i.e. 'Could Not Place' shaped until a stub order_history stamps them)."""
     return HistoryEvent(name=name, description=description, scope=Scope.WORLD)
+
+
+def det(text, *source_files):
+    return Detail(text=text, source_files=list(source_files))
 
 
 def _config(**overrides):
@@ -137,10 +142,10 @@ def _extractors(**overrides):
     Defaults return one canned entity per type; override any key per-test."""
     exts = {
         "locations": _StubExtractor([Location(name="Riverton",
-                                              details=["A river town."],
+                                              details=[det("A river town.")],
                                               supporting_quotes=[Q])]),
         "characters": _StubExtractor([Character(name="Gimli",
-                                               details=["A dwarf who visited Riverton."])]),
+                                               details=[det("A dwarf who visited Riverton.")])]),
         "history": _StubExtractor([hev("The Founding", "Riverton was founded.")]),
         "organizations": _StubExtractor([Organization(name="The Rivermen")]),
         "items": _StubExtractor([Item(name="The Amulet")]),
