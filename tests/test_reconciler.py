@@ -19,14 +19,15 @@ import re
 import pytest
 from pydantic import ValidationError
 
-from models.lore import Location, Character, HistoryEvent, Quote, Scope
+from models.lore import Location, Character, HistoryEvent, Quote, Scope, Detail
 from models.reconcile import (
     ReconcileDecision, MergeGroup, DetailConflict, PossibleDuplicate,
     DateDecision, DatedEvent, PlacementDecision, GapPlacement,
 )
 from agents.reconciler import (
     Reconciler, _combine_group, _resolve_scope, _resolve_player_name,
-    _short_name_veto, _validate_decision, _dedup_quotes, _VetoMerge,
+    _short_name_veto, _validate_decision, _dedup_quotes, _dedup_details,
+    _entity_for_prompt, _VetoMerge,
     _resolve_canonical, _extract_json_object, REVIEW_PREFIX, _resolve_date_text,
     _sanity_guard_parts, _validate_date_decision, _build_spine_and_gaps,
     _validate_placement_decision, _weave_and_stamp, UNDATED,
@@ -35,6 +36,10 @@ from agents.reconciler import (
 
 def q(text, speaker="dm", source="dndgroup.txt"):
     return Quote(text=text, speaker=speaker, source_file=source)
+
+
+def det(text, *source_files):
+    return Detail(text=text, source_files=list(source_files))
 
 
 def loc(name, aliases=None, details=None, quotes=None):
@@ -58,12 +63,50 @@ def test_combine_unions_aliases_and_keeps_losing_name():
     assert "Lake Mundi" not in merged.aliases
 
 
-# --- combine: details (exact-dupe only, order preserved) -------------------
-def test_combine_dedups_details_exact_only_and_preserves_order():
-    a = loc("X", details=["fed by a spring", "said to be bottomless"])
-    b = loc("Y", details=["  fed by a spring ", "sacred to the Kriega"])  # whitespace dupe
+# --- combine: details (same-fact de-dup, sources unioned, order preserved) -
+def test_combine_dedups_details_unions_sources_and_preserves_order():
+    a = loc("X", details=[det("fed by a spring", "public.txt"),
+                          det("said to be bottomless", "public.txt")])
+    b = loc("Y", details=[det("  fed by a spring ", "secret.txt"),   # whitespace dupe, diff file
+                          det("sacred to the Kriega", "secret.txt")])
     merged = _combine_group([a, b], "X")
-    assert merged.details == ["fed by a spring", "said to be bottomless", "sacred to the Kriega"]
+    # visible axis unchanged: same texts, first-seen verbatim, same order
+    assert [d.text for d in merged.details] == \
+        ["fed by a spring", "said to be bottomless", "sacred to the Kriega"]
+    # invisible axis: the shared fact remembers BOTH files (ordered, deduped)
+    assert merged.details[0].source_files == ["public.txt", "secret.txt"]
+    assert merged.details[1].source_files == ["public.txt"]
+    assert merged.details[2].source_files == ["secret.txt"]
+
+
+def test_combine_details_same_fact_same_file_keeps_one_source():
+    a = loc("X", details=[det("fed by a spring", "public.txt")])
+    b = loc("Y", details=[det("fed by a spring", "public.txt")])  # exact dupe, same file
+    merged = _combine_group([a, b], "X")
+    assert [d.text for d in merged.details] == ["fed by a spring"]
+    assert merged.details[0].source_files == ["public.txt"]        # not doubled
+
+
+def test_dedup_details_unions_orders_and_preserves_first_seen():
+    # unit test the helper in isolation
+    out = _dedup_details([det("a", "f1"), det("b", "f1"), det(" a ", "f2"), det("a", "f1")])
+    assert [d.text for d in out] == ["a", "b"]
+    assert out[0].source_files == ["f1", "f2"]   # f1 (1st & 4th) + f2, deduped
+    assert out[1].source_files == ["f1"]
+
+
+# --- merge prompt hides the new source_files tags (behaviour-neutrality) ----
+def test_merge_prompt_shows_details_as_bare_strings_no_source_files():
+    e = loc("X", details=[det("fed by a spring", "secret.txt")])
+    data = _entity_for_prompt(e)
+    assert data["details"] == ["fed by a spring"]        # reduced to bare text
+    assert "source_files" not in json.dumps(data)        # tag never reaches the LLM
+
+
+def test_entity_for_prompt_is_noop_for_history():
+    ev = hev("The Sundering")
+    data = _entity_for_prompt(ev)
+    assert "details" not in data     # HistoryEvent has none; helper doesn't invent one
 
 
 # --- combine: quotes (triple dedup, distinct speakers survive) -------------
@@ -401,6 +444,21 @@ def test_reconcile_clean_merge_collapses_two_to_one():
     assert "Maltaav" in result[0].aliases  # losing name preserved as an alias
 
 
+def test_reconcile_prompt_never_carries_source_files_end_to_end():
+    # Belt-and-suspenders for the behaviour-neutrality invariant: drive a real
+    # reconcile() over entities whose details are tagged with source files, and
+    # confirm neither the tag key nor the file names ever reach the prompt the
+    # client was handed -- so a future prompt-builder change can't silently leak
+    # provenance to the LLM and shift its merge decisions.
+    a = loc("Maltaav", details=[det("a coastal city", "secret.txt")])
+    b = loc("Maltraav", details=[det("a city on the coast", "public.txt")])
+    rec = make_reconciler([GOOD_MERGE])
+    rec.reconcile([a, b])
+    sent_prompt = rec.client.messages.calls[0]["messages"][0]["content"]
+    assert "source_files" not in sent_prompt
+    assert "secret.txt" not in sent_prompt and "public.txt" not in sent_prompt
+
+
 def test_reconcile_retries_bad_json_then_succeeds():
     client = FakeClient(["not json", "still not json", GOOD_MERGE])
     rec = Reconciler(client=client)
@@ -433,8 +491,8 @@ def test_reconcile_total_failure_returns_entries_unmerged_and_logs(caplog):
 
 # === the [REVIEW] log lines ARE the product on these paths ==================
 def test_apply_logs_conflict_with_review_prefix_and_keeps_both_details(caplog):
-    a = loc("Riverton", details=["ruled by the Kriega"])
-    b = loc("Lakeside Keep", details=["ruled by the Maltraav"])
+    a = loc("Riverton", details=[det("ruled by the Kriega")])
+    b = loc("Lakeside Keep", details=[det("ruled by the Maltraav")])
     conflict = DetailConflict(detail_a="ruled by the Kriega", source_a="a.txt",
                               detail_b="ruled by the Maltraav", source_b="b.txt",
                               note="two different rulers named")
@@ -446,8 +504,8 @@ def test_apply_logs_conflict_with_review_prefix_and_keeps_both_details(caplog):
         result = rec._apply(decision, [a, b], "Location")
     assert len(result) == 1
     # both sides of the contradiction are KEPT verbatim, never dropped
-    assert "ruled by the Kriega" in result[0].details
-    assert "ruled by the Maltraav" in result[0].details
+    assert "ruled by the Kriega" in [d.text for d in result[0].details]
+    assert "ruled by the Maltraav" in [d.text for d in result[0].details]
     assert any(REVIEW_PREFIX in r.getMessage() and "contradiction" in r.getMessage()
                for r in caplog.records)
 
@@ -457,8 +515,8 @@ def test_apply_logs_one_review_line_per_conflict(caplog):
     # re-regression that collapses it to a single log: TWO conflicts must produce
     # TWO contradiction lines (one per conflict), not one summary line. This is the
     # behavior a botched auto-fix once silently dropped, so it's worth pinning hard.
-    a = loc("Riverton", details=["ruled by the Kriega", "founded in spring"])
-    b = loc("Lakeside Keep", details=["ruled by the Maltraav", "founded in autumn"])
+    a = loc("Riverton", details=[det("ruled by the Kriega"), det("founded in spring")])
+    b = loc("Lakeside Keep", details=[det("ruled by the Maltraav"), det("founded in autumn")])
     conflicts = [
         DetailConflict(detail_a="ruled by the Kriega", source_a="a.txt",
                        detail_b="ruled by the Maltraav", source_b="b.txt", note="rulers differ"),

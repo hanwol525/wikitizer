@@ -114,12 +114,12 @@ def test_extract_happy_path_single_batch():
     assert client.call_count == 1
     assert [p.name for p in result] == ["The Krieg", "Direwolves"]
     assert result[0].aliases == []
-    assert result[0].details == [
+    assert [d.text for d in result[0].details] == [
         "A seafaring people from the northern coasts",
         "Their raiders are feared for their longships",
     ]
     assert len(result[0].supporting_quotes) == 2
-    assert result[1].details == ["Hunt in packs across the northern tundra"]
+    assert [d.text for d in result[1].details] == ["Hunt in packs across the northern tundra"]
     assert len(result[1].supporting_quotes) == 1
     assert all(isinstance(p, PeopleAndCultures) for p in result)
 
@@ -202,7 +202,7 @@ def test_verbatim_check_drops_non_matching_quote_keeps_siblings(caplog):
         result = agent.extract(messages)
 
     assert len(result) == 1
-    assert result[0].details == ["Sail the cold seas"]
+    assert [d.text for d in result[0].details] == ["Sail the cold seas"]
     assert len(result[0].supporting_quotes) == 1
     assert any(
         "verbatim" in r.getMessage() and "id 0" in r.getMessage()
@@ -225,7 +225,7 @@ def test_verbatim_check_tolerates_multiline_message():
     result = agent.extract(messages)
 
     assert len(result) == 1
-    assert result[0].details == ["A seafaring people"]
+    assert [d.text for d in result[0].details] == ["A seafaring people"]
     assert result[0].supporting_quotes[0].text == flat_quote
 
 
@@ -247,7 +247,7 @@ def test_verify_quotes_false_keeps_non_matching_quote():
     result = agent.extract(messages)
 
     assert len(result) == 1
-    assert result[0].details == ["Invented fact"]
+    assert [d.text for d in result[0].details] == ["Invented fact"]
     assert result[0].supporting_quotes[0].text == "totally invented text not in the message"
 
 
@@ -269,7 +269,7 @@ def test_verbatim_check_drops_empty_quote(caplog):
         result = agent.extract(messages)
 
     assert len(result) == 1
-    assert result[0].details == ["Sail the cold seas"]
+    assert [d.text for d in result[0].details] == ["Sail the cold seas"]
     assert all(q.text for q in result[0].supporting_quotes)
 
 
@@ -290,7 +290,10 @@ def test_identical_quotes_deduped_but_details_kept():
     result = agent.extract(messages)
 
     assert len(result) == 1
-    assert result[0].details == ["Seafarers", "People of the sea"]   # details NOT deduped
+    assert [d.text for d in result[0].details] == ["Seafarers", "People of the sea"]   # details NOT deduped
+    # each fact is tagged with the file of the message it cited (dormant provenance)
+    assert result[0].details[0].source_files == [messages[0].source_file]
+    assert result[0].details[1].source_files == [messages[0].source_file]
     assert len(result[0].supporting_quotes) == 1                      # identical quote deduped
 
 
@@ -350,7 +353,7 @@ def test_no_name_with_detail_kept_name_from_first_detail(caplog):
     assert len(result) == 1
     assert result[0].name == long_detail[:80]
     assert len(result[0].name) == 80
-    assert result[0].details == [long_detail]
+    assert [d.text for d in result[0].details] == [long_detail]
     assert any(
         "using a short form of its first detail" in r.getMessage()
         for r in caplog.records if r.levelno == logging.WARNING
@@ -390,7 +393,7 @@ def test_non_list_details_coerced_to_empty_no_crash(caplog):
         result = agent.extract(messages)
 
     assert [p.name for p in result] == ["The Krieg"]
-    assert result[0].details == []
+    assert [d.text for d in result[0].details] == []
     assert result[0].supporting_quotes == []
     assert any(
         "non-list" in r.getMessage()
@@ -417,7 +420,7 @@ def test_detail_with_non_string_detail_or_quote_dropped(caplog):
         result = agent.extract(messages)
 
     assert len(result) == 1
-    assert result[0].details == ["Seafarers"]
+    assert [d.text for d in result[0].details] == ["Seafarers"]
     assert any(
         "missing a string" in r.getMessage()
         for r in caplog.records if r.levelno == logging.WARNING
@@ -457,7 +460,7 @@ def test_out_of_range_source_id_dropped_other_details_kept(caplog):
         result = agent.extract(messages)
 
     assert len(result) == 1
-    assert result[0].details == ["Fierce"]
+    assert [d.text for d in result[0].details] == ["Fierce"]
     assert any(
         "out of range" in r.getMessage() and "5" in r.getMessage()
         for r in caplog.records if r.levelno == logging.WARNING
@@ -480,7 +483,7 @@ def test_bool_source_id_dropped_never_indexed_as_0_or_1(caplog):
 
     assert len(result) == 1
     assert result[0].name == "The Krieg"
-    assert result[0].details == []
+    assert [d.text for d in result[0].details] == []
     assert result[0].supporting_quotes == []
     assert any(
         "non-integer source_id" in r.getMessage()

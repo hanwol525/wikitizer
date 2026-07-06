@@ -41,7 +41,7 @@ from typing import Optional
 from pydantic import ValidationError
 
 from agents.base_extractor import BaseExtractor
-from models.lore import Character
+from models.lore import Character, Detail
 from models.message import Message
 
 logger = logging.getLogger(__name__)
@@ -194,7 +194,7 @@ class CharactersExtractor(BaseExtractor):
             if q is None:
                 # _resolve_quote already logged the specific reason; drop the detail.
                 continue
-            details_out.append(detail_text)
+            details_out.append(Detail(text=detail_text, source_files=[q.source_file]))
             if q not in quotes_out:
                 quotes_out.append(q)
 
