@@ -23,11 +23,12 @@ input -> canned entities) and the empty-input test (no input -> empty wiki).
 """
 
 import logging
+from pathlib import Path
 
 import pytest
 
 import orchestrator
-from orchestrator import Orchestrator, PipelineConfig
+from orchestrator import Orchestrator, PipelineConfig, WikiOutput, _history_pipeline
 from models.lore import (
     Character,
     Detail,
@@ -57,6 +58,10 @@ def hev(name, description):
 
 def det(text, *source_files):
     return Detail(text=text, source_files=list(source_files))
+
+
+def q(text, source="group.txt"):
+    return Quote(text=text, speaker="M", source_file=source)
 
 
 def _config(**overrides):
@@ -180,12 +185,23 @@ def patched_parse(monkeypatch):
     monkeypatch.setattr(orchestrator, "filter_reactions", lambda msgs: list(msgs))
 
 
+@pytest.fixture
+def patched_parse_multi(monkeypatch):
+    """Like patched_parse, but tags each message with its file's BARE name, so a
+    multi-file `files` list yields multi-source messages (what exclusion needs)."""
+    def fake_parse(filepath, speaker_map):
+        name = Path(filepath).name
+        return [build_message("Alice", f"Content from {name}.", name)]
+    monkeypatch.setattr(orchestrator, "parse_chat_log", fake_parse)
+    monkeypatch.setattr(orchestrator, "filter_reactions", lambda msgs: list(msgs))
+
+
 # --- 1. happy path ---------------------------------------------------------- #
 
 def test_happy_path_renders_all_wired_sections(patched_parse, caplog):
     caplog.set_level(logging.INFO)
     orch = _StubbedOrchestrator(_StubNoise(), _extractors(), _StubReconciler())
-    out = orch.run(["dummy.txt"], _config())
+    out = orch.run(["dummy.txt"], _config()).full
 
     assert out                                   # non-empty wiki
     assert "## Locations" in out
@@ -204,7 +220,7 @@ def test_extractor_failure_drops_only_its_section(patched_parse, caplog):
     caplog.set_level(logging.INFO)
     exts = _extractors(locations=_StubExtractor(raise_exc=RuntimeError("boom: extract")))
     orch = _StubbedOrchestrator(_StubNoise(), exts, _StubReconciler())
-    out = orch.run(["dummy.txt"], _config())
+    out = orch.run(["dummy.txt"], _config()).full
 
     assert "## Locations" not in out             # the dead extractor's section is gone
     assert "## Characters" in out                # siblings still render
@@ -218,7 +234,7 @@ def test_reconcile_failure_uses_unreconciled_entries(patched_parse, caplog):
     caplog.set_level(logging.INFO)
     orch = _StubbedOrchestrator(
         _StubNoise(), _extractors(), _StubReconciler(reconcile_raise_on=Location))
-    out = orch.run(["dummy.txt"], _config())
+    out = orch.run(["dummy.txt"], _config()).full
 
     # the un-reconciled locations are used, so Riverton still renders...
     assert "## Locations" in out and "Riverton" in out
@@ -232,7 +248,7 @@ def test_order_history_failure_renders_could_not_place(patched_parse, caplog):
     caplog.set_level(logging.INFO)
     orch = _StubbedOrchestrator(
         _StubNoise(), _extractors(), _StubReconciler(order_raise=True))
-    out = orch.run(["dummy.txt"], _config())
+    out = orch.run(["dummy.txt"], _config()).full
 
     # events kept their unset timeline fields -> they render under Could Not Place
     # (which, when it's the whole History section, uses the explanatory note).
@@ -265,7 +281,7 @@ def test_empty_input_returns_empty_and_warns(caplog):
     caplog.set_level(logging.INFO)
     # files=[] -> no parse at all -> no messages; stubs mirror empty -> empty wiki.
     orch = _StubbedOrchestrator(_StubNoise(), _extractors(), _StubReconciler())
-    out = orch.run([], _config())
+    out = orch.run([], _config()).full
 
     assert out == ""
     assert "wiki will be empty" in caplog.text
@@ -322,9 +338,172 @@ def test_run_over_a_real_parsed_log(tmp_path, caplog):
     )
     noise = _StubNoise()
     orch = _StubbedOrchestrator(noise, _extractors(), _StubReconciler())
-    out = orch.run([str(log)], _config())
+    out = orch.run([str(log)], _config()).full
 
     # a real message reached the (stub) noise filter, and the wiki rendered.
     assert noise.seen and len(noise.seen) == 1
     assert "Riverton sits on the river Mund." in noise.seen[0].content
     assert "## Locations" in out and "Riverton" in out
+
+
+# --- 4.6 Part 2: _history_pipeline (the restricted doc's second History pass) #
+# Same degrade-don't-crash policy as the main run, exercised with the existing
+# _StubExtractor / _StubReconciler flags.
+
+def test_history_pipeline_happy_path_extracts_reconciles_orders():
+    ev = hev("The Founding", "It began.")
+    out = _history_pipeline([build_message("A", "x", "group.txt")],
+                            _StubExtractor([ev]), _StubReconciler())
+    assert [e.name for e in out] == ["The Founding"]
+    # the stub order_history stamps a dated timeline -> events came back ordered
+    assert out[0].calendar_system == "AR years" and out[0].chronological_position == 0
+
+
+def test_history_pipeline_extract_failure_returns_empty(caplog):
+    caplog.set_level(logging.ERROR)
+    out = _history_pipeline([build_message("A", "x", "g.txt")],
+                            _StubExtractor(raise_exc=RuntimeError("boom")), _StubReconciler())
+    assert out == []
+    assert "[REVIEW]" in caplog.text and "extract failed" in caplog.text
+
+
+def test_history_pipeline_reconcile_failure_passes_raw_through():
+    ev = hev("E", "d")
+    rec = _StubReconciler(reconcile_raise_on=HistoryEvent)
+    out = _history_pipeline([build_message("A", "x", "g.txt")], _StubExtractor([ev]), rec)
+    # reconcile raised -> raw events used; order_history still stamps them
+    assert [e.name for e in out] == ["E"]
+    assert out[0].calendar_system == "AR years"
+
+
+def test_history_pipeline_order_failure_returns_unordered():
+    ev = hev("E", "d")
+    rec = _StubReconciler(order_raise=True)
+    out = _history_pipeline([build_message("A", "x", "g.txt")], _StubExtractor([ev]), rec)
+    # order_history raised -> the un-ordered (reconciled) events come back
+    assert [e.name for e in out] == ["E"]
+    assert out[0].chronological_position is None   # never stamped
+
+
+# --- 4.6 Part 2: the restricted doc end-to-end through run() ----------------- #
+
+class _HistoryStub:
+    """A history extractor whose extract() returns a PublicEvent always, plus a
+    SecretEvent ONLY when it sees a message sourced from 'secret.txt'. Models the
+    leak-proof-by-construction path: the restricted extraction never sees the secret
+    message, so SecretEvent never forms. Mirrors the empty-in -> empty-out contract."""
+
+    def __init__(self):
+        self.called = False
+
+    def extract(self, messages):
+        self.called = True
+        if not messages:
+            return []
+        events = [hev("PublicEvent", "A public event.")]
+        if any(m.source_file == "secret.txt" for m in messages):
+            events.append(hev("SecretEvent", "A secret event."))
+        return events
+
+
+def test_run_without_exclusions_has_no_restricted_doc(patched_parse):
+    orch = _StubbedOrchestrator(_StubNoise(), _extractors(), _StubReconciler())
+    result = orch.run(["dummy.txt"], _config())
+    assert isinstance(result, WikiOutput)
+    assert result.full                        # non-empty full doc
+    assert result.restricted is None          # no exclusions -> no restricted doc (not "")
+
+
+def test_run_with_exclusions_produces_both_docs(patched_parse_multi):
+    orch = _StubbedOrchestrator(_StubNoise(), _extractors(), _StubReconciler())
+    result = orch.run(["logs/group.txt", "logs/secret.txt"], _config(),
+                      exclude_sources=["secret.txt"])
+    assert result.full is not None and result.restricted is not None
+
+
+def test_restricted_doc_omits_excluded_entity_content(patched_parse_multi):
+    # One public entity, one whose fact AND quote are both secret-only.
+    public = Location(name="Publicton", details=[det("A public town.", "group.txt")],
+                      supporting_quotes=[q("Publicton exists", "group.txt")])
+    secret = Location(name="Secretville", details=[det("A hidden fort.", "secret.txt")],
+                      supporting_quotes=[q("Secretville exists", "secret.txt")])
+    exts = _extractors(locations=_StubExtractor([public, secret]))
+    orch = _StubbedOrchestrator(_StubNoise(), exts, _StubReconciler())
+    result = orch.run(["logs/group.txt", "logs/secret.txt"], _config(),
+                      exclude_sources=["secret.txt"])
+    assert "Secretville" in result.full and "Publicton" in result.full   # full has both
+    assert "Secretville" not in result.restricted   # secret-only entity carved out
+    assert "Publicton" in result.restricted         # public entity survives
+
+
+def test_restricted_history_reruns_over_the_subset(patched_parse_multi):
+    orch = _StubbedOrchestrator(_StubNoise(), _extractors(history=_HistoryStub()),
+                                _StubReconciler())
+    result = orch.run(["logs/group.txt", "logs/secret.txt"], _config(),
+                      exclude_sources=["secret.txt"])
+    # full run saw the secret message -> SecretEvent formed; the restricted extract
+    # never saw it -> SecretEvent can't form (leak-proof by construction).
+    assert "SecretEvent" in result.full and "PublicEvent" in result.full
+    assert "SecretEvent" not in result.restricted
+    assert "PublicEvent" in result.restricted
+
+
+def test_bad_exclude_name_aborts_before_any_agent():
+    # No parse fixture on purpose: validation must raise BEFORE any parse/agent work.
+    noise = _StubNoise()
+    orch = _StubbedOrchestrator(noise, _extractors(), _StubReconciler())
+    with pytest.raises(ValueError):
+        orch.run(["logs/group.txt"], _config(), exclude_sources=["ghost.txt"])
+    assert noise.seen is None   # classify never ran -> aborted before touching any agent
+
+
+def test_restricted_carves_secret_fact_and_quote_from_a_surviving_entity(patched_parse_multi):
+    # The carving that DOES work, at the orchestrator level: a SURVIVING mixed-content
+    # entity keeps its public fact+quote but has its secret-sourced fact AND secret
+    # quote stripped from the restricted doc (both are source-tagged, so provenance
+    # carving reaches them). Uses a non-Locations type on purpose (the review noted
+    # only Locations was covered end-to-end).
+    mixed = Character(
+        name="Gandalf",
+        details=[det("A wandering wizard.", "group.txt"),
+                 det("Is secretly the Maia Olorin.", "secret.txt")],
+        supporting_quotes=[q("Gandalf wanders the wilds", "group.txt"),
+                           q("Gandalf is the Maia Olorin", "secret.txt")],
+    )
+    orch = _StubbedOrchestrator(_StubNoise(), _extractors(characters=_StubExtractor([mixed])),
+                                _StubReconciler())
+    result = orch.run(["logs/group.txt", "logs/secret.txt"], _config(),
+                      exclude_sources=["secret.txt"])
+    # full doc carries everything
+    assert "A wandering wizard." in result.full and "secretly the Maia Olorin" in result.full
+    assert "Gandalf is the Maia Olorin" in result.full          # secret quote in full footnotes
+    # restricted: entity survives on the public fact; secret FACT + secret QUOTE carved out
+    assert "Gandalf" in result.restricted
+    assert "A wandering wizard." in result.restricted
+    assert "secretly the Maia Olorin" not in result.restricted  # secret fact text gone
+    assert "Gandalf is the Maia Olorin" not in result.restricted  # secret quote text gone
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="KNOWN LIMITATION (4.6 Part 2, deferred): entity name/aliases carry no source "
+           "provenance, so a secret-derived NAME on a surviving entity is not scrubbed and "
+           "leaks into the restricted doc's heading/anchor. Fix deferred (re-extract entities "
+           "like History, or add name/alias provenance). See exclusion.py 'KNOWN LIMITATION'. "
+           "This test asserts the DESIRED leak-free behaviour, so it xfails today and flips to "
+           "passing (strict -> forces removing this marker) once the gap is closed.",
+)
+def test_restricted_doc_leaks_secret_derived_entity_name_KNOWN_GAP(patched_parse_multi):
+    # A surviving entity whose NAME came only from the excluded file (here the secret
+    # true-name "Blackspire Keep") but which keeps a public fact -> the entity survives
+    # and its name/anchor currently leak into the restricted doc. Desired: absent.
+    leaky = Location(
+        name="Blackspire Keep",                                     # DM-file-only true name
+        details=[det("An old fort on the hill.", "group.txt")],     # public -> entity survives
+        supporting_quotes=[q("the old fort on the hill", "group.txt")],
+    )
+    orch = _StubbedOrchestrator(_StubNoise(), _extractors(locations=_StubExtractor([leaky])),
+                                _StubReconciler())
+    result = orch.run(["logs/group.txt", "logs/secret.txt"], _config(),
+                      exclude_sources=["secret.txt"])
+    assert "Blackspire Keep" not in result.restricted   # DESIRED (fails today -> xfail)

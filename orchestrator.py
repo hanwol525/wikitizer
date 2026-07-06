@@ -12,6 +12,7 @@ reconciler's timeline weave already follows -- an incomplete wiki beats a fake o
 import logging
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
+from typing import Optional
 
 import anthropic
 
@@ -27,6 +28,7 @@ from agents.item_extractor import ItemExtractor
 from agents.people_and_cultures_extractor import PeopleAndCulturesExtractor
 from agents.reconciler import Reconciler
 from renderer.markdown import render_wiki
+from exclusion import validate_exclusions, filter_entities
 
 logger = logging.getLogger(__name__)
 
@@ -35,6 +37,36 @@ logger = logging.getLogger(__name__)
 # log noise. Only the degrade-and-continue logs use it -- an abort (a crash) is
 # unmissable on its own and doesn't need flagging.
 REVIEW_PREFIX = "[REVIEW]"
+
+
+def _history_pipeline(messages, history_extractor, reconciler):
+    """Run History's three steps (extract -> reconcile -> order_history) over
+    `messages`, degrading exactly like the main run: a failed step logs a loud
+    [REVIEW] line and falls back to a safe partial result instead of crashing.
+    Returns the ordered events (timeline fields filled), or a less-ordered/empty
+    list if a step failed.
+
+    Used only for the restricted doc's second History pass. The MAIN run doesn't
+    call this -- there, History extraction is entangled with the 6-way parallel
+    fan-out and its reconcile with the per-type loop -- so we leave the main path
+    exactly as it is and only reuse this for the one extra pass.
+    """
+    try:
+        raw = history_extractor.extract(messages)
+    except Exception as exc:
+        logger.error("%s restricted history extract failed; empty history. %s", REVIEW_PREFIX, exc)
+        return []
+    try:
+        deduped = reconciler.reconcile(raw)
+    except Exception as exc:
+        logger.error("%s restricted history reconcile failed; using un-reconciled. %s", REVIEW_PREFIX, exc)
+        deduped = raw
+    try:
+        return reconciler.order_history(deduped)
+    except Exception as exc:
+        logger.error("%s restricted history order_history failed; events -> 'Could Not "
+                     "Place'. %s", REVIEW_PREFIX, exc)
+        return deduped   # unordered -> renders under Could Not Place
 
 
 @dataclass
@@ -50,6 +82,18 @@ class PipelineConfig:
     speaker_map: dict[str, str]
     crosslink_words: dict
     max_workers: int = 6
+
+
+@dataclass
+class WikiOutput:
+    """What run() hands back. `full` is always the complete wiki. `restricted` is
+    the secrets-hidden wiki when exclude_sources was given, or None when it wasn't --
+    which is DIFFERENT from an empty string (that would mean 'you asked, but every
+    scrap of content was in an excluded file, so nothing public was left'). main.py
+    uses that difference to decide whether to write the second file at all.
+    """
+    full: str
+    restricted: Optional[str] = None
 
 
 class Orchestrator:
@@ -94,12 +138,22 @@ class Orchestrator:
         reconciler = Reconciler(client=self.client)
         return noise_filter, extractors, reconciler
 
-    def run(self, files, config: PipelineConfig) -> str:
-        """Walk the full pipeline and return the finished wiki markdown.
+    def run(self, files, config: PipelineConfig, exclude_sources=None) -> "WikiOutput":
+        """Walk the full pipeline and return a WikiOutput (full + optional restricted).
 
         parse+filter each file -> concat -> noise-filter -> select ->
         extract (6 in parallel) -> reconcile per type + order_history -> render.
+
+        When exclude_sources is given, ALSO builds a restricted doc: entities carved
+        by filter_entities (confidential-only facts/quotes stripped), and History
+        RE-RUN over the messages minus the excluded files -- leak-proof by
+        construction, since the History extractor never sees the secret messages.
         """
+        # Fail fast on a bad exclude name BEFORE any work. A name that matches
+        # nothing would silently leave those messages in the "restricted" doc.
+        if exclude_sources:
+            validate_exclusions(exclude_sources, files)
+
         # --- 1. Parse + reaction-filter every file, concatenate in pass-order. ---
         # Pure Python, no LLM, so it's cheap and sequential. A parse failure is left
         # to RAISE (abort): it's before any paid call, and silently skipping a file
@@ -179,8 +233,10 @@ class Orchestrator:
             )
             # leave `events` as the reconciled-but-unordered list (timeline fields None)
 
-        # --- 5. Render the whole wiki and return it. Writing to disk is main.py's job. ---
-        return render_wiki(
+        # --- 5. Render the FULL doc. (Identical to what run() returned before --
+        #        same inputs, same call -- so the full wiki is byte-for-byte
+        #        unchanged; we just hold it in a variable now.) ---
+        full = render_wiki(
             locations=reconciled["locations"],
             characters=reconciled["characters"],
             events=events,
@@ -189,3 +245,23 @@ class Orchestrator:
             people=reconciled["people"],
             common_words=config.crosslink_words,
         )
+
+        # --- 6. If exclusions were requested, build the RESTRICTED doc too. ---
+        # Entities are CARVED from the finished lore (no re-extraction). History is
+        # RE-RUN over the messages minus the excluded files -- so a secret can't be
+        # woven into a description, because the extractor never sees it.
+        restricted = None
+        if exclude_sources:
+            excluded = set(exclude_sources)   # bare filenames; validated above
+            restricted_messages = [m for m in filtered if m.source_file not in excluded]
+            restricted = render_wiki(
+                locations=filter_entities(reconciled["locations"], excluded),
+                characters=filter_entities(reconciled["characters"], excluded),
+                events=_history_pipeline(restricted_messages, extractors["history"], reconciler),
+                organizations=filter_entities(reconciled["organizations"], excluded),
+                items=filter_entities(reconciled["items"], excluded),
+                people=filter_entities(reconciled["people"], excluded),
+                common_words=config.crosslink_words,
+            )
+
+        return WikiOutput(full=full, restricted=restricted)
