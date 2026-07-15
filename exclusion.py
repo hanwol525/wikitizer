@@ -30,10 +30,11 @@ are out of the current brief's scope. Tracked by the xfail regression test
 tests/test_orchestrator.py, which flips to passing once the gap is closed.
 """
 
+from collections import Counter
 from pathlib import Path
 
 
-def validate_exclusions(exclude_sources: list, files: list) -> None:
+def validate_exclusions(exclude_sources: list[str], files: list[str]) -> None:
     """Raise ValueError if any name in `exclude_sources` isn't one of the input
     files. Match is on the BARE FILENAME, because that's what every message stores
     as its source (the parser sets source_file = Path(filepath).name). So the
@@ -45,7 +46,16 @@ def validate_exclusions(exclude_sources: list, files: list) -> None:
     is a real input) is an error, so you always see the exact valid names and confirm
     you're excluding what you think.
     """
-    valid = {Path(f).name for f in files}          # the bare filenames messages carry
+    basenames = [Path(f).name for f in files]
+    counts = Counter(basenames)
+    dupes = sorted([name for name, c in counts.items() if c > 1])
+    if dupes:
+        raise ValueError(
+            "Cannot build exclusions with duplicate input basenames (messages store only "
+            f"the bare filename as source_file). Duplicates: {dupes}"
+        )
+
+    valid = set(basenames)          # the bare filenames messages carry
     unknown = [name for name in exclude_sources if name not in valid]
     if not unknown:
         return
