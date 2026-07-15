@@ -119,15 +119,36 @@ class BaseExtractor(BaseAgent):
         """Extract lore objects from ``messages``. Element type is set by the
         concrete subclass (e.g. ``list[Location]``); see its docstring.
 
-        Chunks into batches of ``self.batch_size`` and extracts each independently
-        so a bad batch is contained. Empty input short-circuits with no API call.
+        Groups messages by ``source_file`` FIRST, then chunks each file's messages
+        into batches of ``self.batch_size`` and extracts each independently -- so a
+        bad batch is contained AND no batch ever mixes two files. Empty input
+        short-circuits with no API call.
+
+        The file-purity is load-bearing, not tidiness. ``_quote_is_verbatim`` proves
+        a QUOTE really came from its cited message, but a detail's TEXT is free-form
+        prose we never check against anything -- so in a batch mixing two files
+        Claude can write a fact citing a quote from file A while weaving in
+        something it read from file B. Everything downstream (Detail.source_files,
+        Alias.source_files, name_sources, and therefore the whole --exclude-sources
+        feature) assumes an entry's text can only contain knowledge from the file
+        its batch came from. Keep batches file-pure or that assumption silently
+        becomes false. It also lets ``_build_entry`` trust ``batch[0].source_file``
+        as THE file for the whole batch.
         """
         if not messages:
             return []
+        # dict preserves insertion order (3.7+), so files come out in first-seen
+        # order and each file's messages keep their original order -- same output
+        # ordering as the old flat chunking for a single-file input.
+        by_file: dict = {}
+        for m in messages:
+            by_file.setdefault(m.source_file, []).append(m)
+
         out = []
-        for start in range(0, len(messages), self.batch_size):
-            batch = messages[start:start + self.batch_size]
-            out.extend(self._extract_batch(batch))
+        for file_messages in by_file.values():
+            for start in range(0, len(file_messages), self.batch_size):
+                batch = file_messages[start:start + self.batch_size]
+                out.extend(self._extract_batch(batch))
         return out
 
     def _extract_batch(self, batch: list[Message]) -> list:

@@ -30,6 +30,7 @@ import pytest
 import orchestrator
 from orchestrator import Orchestrator, PipelineConfig, WikiOutput, _history_pipeline
 from models.lore import (
+    Alias,
     Character,
     Detail,
     HistoryEvent,
@@ -40,6 +41,7 @@ from models.lore import (
     Quote,
     Scope,
 )
+from agents.reconciler import _combine_group
 from tests.fixtures.case import build_message
 
 
@@ -423,7 +425,8 @@ def test_run_with_exclusions_produces_both_docs(patched_parse_multi):
 
 def test_restricted_doc_omits_excluded_entity_content(patched_parse_multi):
     # One public entity, one whose fact AND quote are both secret-only.
-    public = Location(name="Publicton", details=[det("A public town.", "group.txt")],
+    public = Location(name="Publicton", name_sources=["group.txt"],
+                      details=[det("A public town.", "group.txt")],
                       supporting_quotes=[q("Publicton exists", "group.txt")])
     secret = Location(name="Secretville", details=[det("A hidden fort.", "secret.txt")],
                       supporting_quotes=[q("Secretville exists", "secret.txt")])
@@ -465,6 +468,7 @@ def test_restricted_carves_secret_fact_and_quote_from_a_surviving_entity(patched
     # only Locations was covered end-to-end).
     mixed = Character(
         name="Gandalf",
+        name_sources=["group.txt"],
         details=[det("A wandering wizard.", "group.txt"),
                  det("Is secretly the Maia Olorin.", "secret.txt")],
         supporting_quotes=[q("Gandalf wanders the wilds", "group.txt"),
@@ -484,21 +488,13 @@ def test_restricted_carves_secret_fact_and_quote_from_a_surviving_entity(patched
     assert "Gandalf is the Maia Olorin" not in result.restricted  # secret quote text gone
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="KNOWN LIMITATION (4.6 Part 2, deferred): entity name/aliases carry no source "
-           "provenance, so a secret-derived NAME on a surviving entity is not scrubbed and "
-           "leaks into the restricted doc's heading/anchor. Fix deferred (re-extract entities "
-           "like History, or add name/alias provenance). See exclusion.py 'KNOWN LIMITATION'. "
-           "This test asserts the DESIRED leak-free behaviour, so it xfails today and flips to "
-           "passing (strict -> forces removing this marker) once the gap is closed.",
-)
-def test_restricted_doc_leaks_secret_derived_entity_name_KNOWN_GAP(patched_parse_multi):
-    # A surviving entity whose NAME came only from the excluded file (here the secret
-    # true-name "Blackspire Keep") but which keeps a public fact -> the entity survives
-    # and its name/anchor currently leak into the restricted doc. Desired: absent.
+def test_restricted_doc_does_not_leak_secret_derived_entity_name(patched_parse_multi):
+    # Phase 4.6 Part 3 FIX (was an xfail-tracked leak): a surviving entity whose
+    # canonical NAME came only from the excluded file is RE-HEADED to its public alias
+    # in the restricted doc, so the secret name never reaches the heading/anchor.
     leaky = Location(
-        name="Blackspire Keep",                                     # DM-file-only true name
+        name="Blackspire Keep", name_sources=["secret.txt"],       # DM-file-only true name
+        aliases=[Alias(text="the old fort", source_files=["group.txt"])],  # public alias
         details=[det("An old fort on the hill.", "group.txt")],     # public -> entity survives
         supporting_quotes=[q("the old fort on the hill", "group.txt")],
     )
@@ -506,4 +502,42 @@ def test_restricted_doc_leaks_secret_derived_entity_name_KNOWN_GAP(patched_parse
                                 _StubReconciler())
     result = orch.run(["logs/group.txt", "logs/secret.txt"], _config(),
                       exclude_sources=["secret.txt"])
-    assert "Blackspire Keep" not in result.restricted   # DESIRED (fails today -> xfail)
+    assert "Blackspire Keep" in result.full            # full doc still heads with the true name
+    assert "Blackspire Keep" not in result.restricted  # FIXED: the secret name never leaks
+    assert "the old fort" in result.restricted         # re-headed to the public alias
+
+
+class _MergeAllReconciler(_StubReconciler):
+    """reconcile() merges all same-type entries into one via the REAL _combine_group
+    under `canonical`, so the reconciler's name_sources/alias provenance is exercised
+    end-to-end through run() before the carve. History passes through unchanged."""
+
+    def __init__(self, canonical, **kw):
+        super().__init__(**kw)
+        self.canonical = canonical
+
+    def reconcile(self, entries):
+        entries = list(entries)
+        if len(entries) >= 2 and not isinstance(entries[0], HistoryEvent):
+            return [_combine_group(entries, self.canonical)]
+        return entries
+
+
+def test_restricted_reheads_after_a_merge_under_a_secret_canonical(patched_parse_multi):
+    # The exact end-to-end leak the review found: a public "the old fort" merges with a
+    # secret "Blackspire Keep", the reconciler heads the merge with the secret proper
+    # name -- and the restricted doc must re-head to the public alias.
+    public = Location(name="the old fort", name_sources=["group.txt"],
+                      details=[det("An old fort on the hill.", "group.txt")],
+                      supporting_quotes=[q("the old fort on the hill", "group.txt")])
+    secret = Location(name="Blackspire Keep", name_sources=["secret.txt"],
+                      details=[det("the lich's secret lair", "secret.txt")],
+                      supporting_quotes=[q("Blackspire Keep is the lich's lair", "secret.txt")])
+    exts = _extractors(locations=_StubExtractor([public, secret]))
+    orch = _StubbedOrchestrator(_StubNoise(), exts, _MergeAllReconciler("Blackspire Keep"))
+    result = orch.run(["logs/group.txt", "logs/secret.txt"], _config(),
+                      exclude_sources=["secret.txt"])
+    assert "Blackspire Keep" in result.full            # merged & headed with the secret name
+    assert "Blackspire Keep" not in result.restricted  # re-headed away
+    assert "the old fort" in result.restricted         # to the public alias
+    assert "lich" not in result.restricted             # the secret fact is carved too

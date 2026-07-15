@@ -396,7 +396,7 @@ def build_crosslink_map(noun_entities: list, events: Optional[list] = None, comm
         if s.strip():
             name_claims.setdefault(s, set()).add(entity_anchors[i])
         for alias in ent.aliases:
-            a = _nfc(_split_article(alias))
+            a = _nfc(_split_article(alias.text))
             if a.strip():
                 alias_claims.setdefault(a, set()).add(entity_anchors[i])
 
@@ -414,7 +414,7 @@ def build_crosslink_map(noun_entities: list, events: Optional[list] = None, comm
         if s.strip():
             name_claims.setdefault(s, set()).add(event_anchors[i])
         for alias in ev.aliases:
-            a = _nfc(_split_article(alias))
+            a = _nfc(_split_article(alias.text))
             if a.strip():
                 alias_claims.setdefault(a, set()).add(event_anchors[i])
 

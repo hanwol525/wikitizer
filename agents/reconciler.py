@@ -19,7 +19,7 @@ import re
 from pydantic import ValidationError
 
 from agents.base import BaseAgent, ClaudeJSONError, strip_code_fences
-from models.lore import Character, HistoryEvent, Scope
+from models.lore import Alias, Character, HistoryEvent, Scope
 from models.reconcile import ReconcileDecision, DateDecision, PlacementDecision
 
 logger = logging.getLogger(__name__)
@@ -157,17 +157,51 @@ def _dedup_details(details):
     return [by_key[k] for k in order]
 
 
+def _dedup_aliases(aliases):
+    """Collapse Aliases with the same text into one, unioning their sources.
+
+    The alias twin of ``_dedup_details``, and it replaces the old
+    ``_dedup_preserve_order`` call on aliases now that they're objects. Same visible
+    behaviour as the old string de-dup -- key on the stripped ``text``, keep the
+    first-seen ``Alias`` verbatim, preserve order -- plus the invisible part: an
+    alias stated in two files keeps the ORDERED UNION of both, so the carve strips
+    it only when ALL its sources are excluded.
+
+    Never mutates an input Alias: a union produces a fresh one via model_copy.
+    """
+    by_key = {}   # stripped text -> surviving Alias (source_files accumulated)
+    order = []    # stripped keys, in first-seen order
+    for a in aliases:
+        key = a.text.strip()
+        if key in by_key:
+            survivor = by_key[key]
+            merged = _dedup_preserve_order(survivor.source_files + a.source_files)
+            by_key[key] = survivor.model_copy(update={"source_files": merged})
+        else:
+            by_key[key] = a
+            order.append(key)
+    return [by_key[k] for k in order]
+
+
 def _entity_for_prompt(entry):
-    """Serialise an entry the way the reconciler LLM has ALWAYS seen it: details as
-    bare text strings, with no ``source_files`` tag. The provenance tags are new
-    plumbing the LLM never saw before, so we strip them back out here to keep the
-    merge prompt byte-identical -- which keeps Claude's merge decisions from shifting
-    AND keeps the prompt cache hitting. HistoryEvent has no ``details``, so the guard
-    makes this a no-op for it.
+    """Serialise an entry the way the reconciler LLM has ALWAYS seen it: details and
+    aliases as bare text strings, with no source tags and no name_sources. The
+    provenance fields are plumbing the LLM never saw, so we strip them back out to
+    keep the prompt's SHAPE identical -- same keys, same order, same values -- which
+    keeps Claude's merge decisions driven by exactly the information they always
+    were, and keeps the prompt cache hitting. HistoryEvent has no ``details``, so
+    that guard makes it a no-op there.
+
+    Key order survives because `name_sources` is declared right after `name`, so
+    popping it leaves {name, aliases, details, supporting_quotes, ...} in the
+    original order, and `{**data, k: v}` replaces a key in place.
     """
     data = entry.model_dump(mode="json")
     if "details" in data:
         data = {**data, "details": [d["text"] for d in data["details"]]}
+    if "aliases" in data:
+        data = {**data, "aliases": [a["text"] for a in data["aliases"]]}
+    data.pop("name_sources", None)
     return data
 
 
@@ -246,7 +280,7 @@ def _short_name_veto(members) -> bool:
     # CJ(aliases=['CJ']) + DJ would wrongly merge. Hence the `other is not m` guard.
     stated = any(
         m.name.strip().lower() in {
-            a.strip().lower()
+            a.text.strip().lower()
             for other in members if other is not m
             for a in other.aliases
         }
@@ -273,9 +307,41 @@ def _resolve_canonical(members, canonical):
             return m.name
     for m in members:
         for a in m.aliases:
-            if a.strip().lower() == key:
-                return a
+            if a.text.strip().lower() == key:
+                return a.text
     return canonical
+
+
+def _canonical_sources(members, canonical):
+    """The source file(s) of the winning canonical name.
+
+    ``_resolve_canonical`` has already snapped `canonical` to a string that
+    LITERALLY appears among the members (as a name or an alias) -- an invented
+    canonical is rejected by ``_validate_decision`` before we ever get here -- so its
+    provenance is always derivable. We just look it up the same way and union across
+    every member that asserted it: the same name stated in two files is attested by
+    both, so a later exclusion drops it only when ALL of them are excluded (the
+    Detail rule again).
+
+    Match is stripped but CASE-SENSITIVE, matching how `_dedup_details` /
+    `_dedup_aliases` key. That's deliberate: `_resolve_canonical` returns a verbatim
+    stored string, so an exact match is right, and if the LLM picked the
+    differently-cased twin ("RIVERTON" over "Riverton") we WANT only that twin's
+    sources -- the other spelling becomes an alias carrying its own.
+
+    Returns [] if nothing matches (a defensive path `_resolve_canonical` allows but
+    validation should have prevented). [] means "not provably public", so the carve
+    re-heads -- the same over-hiding default as a source-less Detail.
+    """
+    key = canonical.strip()
+    sources = []
+    for m in members:
+        if m.name.strip() == key:
+            sources.extend(m.name_sources)
+        for a in m.aliases:
+            if a.text.strip() == key:
+                sources.extend(a.source_files)
+    return _dedup_preserve_order(sources)
 
 
 def _combine_group(members, canonical):
@@ -296,9 +362,11 @@ def _combine_group(members, canonical):
     for m in members:
         aliases.extend(m.aliases)
         if m.name != canonical:
-            aliases.append(m.name)
-    aliases = _dedup_preserve_order(aliases)
-    aliases = [a for a in aliases if a != canonical]  # canonical shouldn't alias itself
+            # A losing name becomes an alias -- and carries ITS OWN provenance
+            # across, which is what lets the carve re-head to it later.
+            aliases.append(Alias(text=m.name, source_files=list(m.name_sources)))
+    aliases = _dedup_aliases(aliases)
+    aliases = [a for a in aliases if a.text != canonical]  # canonical shouldn't alias itself
 
     # quotes: concat all, dedup on the triple.
     quotes = []
@@ -317,6 +385,7 @@ def _combine_group(members, canonical):
             logger.debug("Reconciler: scope clash %s -> kept broadest.", set(scopes))
         return cls(
             name=canonical,
+            name_sources=_canonical_sources(members, canonical),
             aliases=aliases,
             description=description,
             scope=_resolve_scope(scopes),
@@ -341,6 +410,7 @@ def _combine_group(members, canonical):
             logger.debug("Reconciler: is_pc clash in '%s' -> True wins.", canonical)
         return cls(
             name=canonical,
+            name_sources=_canonical_sources(members, canonical),
             aliases=aliases,
             is_pc=any(m.is_pc for m in members),       # True wins (False = absence of evidence)
             player_name=_resolve_player_name(members),  # may raise _VetoMerge
@@ -348,8 +418,9 @@ def _combine_group(members, canonical):
             supporting_quotes=quotes,
         )
 
-    # Location / Organization / Item / PeopleAndCultures: identical 4-field shape.
-    return cls(name=canonical, aliases=aliases, details=details, supporting_quotes=quotes)
+    # Location / Organization / Item / PeopleAndCultures: identical shape.
+    return cls(name=canonical, name_sources=_canonical_sources(members, canonical),
+               aliases=aliases, details=details, supporting_quotes=quotes)
 
 
 def _validate_decision(decision, entries):
@@ -387,7 +458,7 @@ def _validate_decision(decision, entries):
         allowed = set()
         for idx in valid:
             allowed.add(entries[idx].name.strip().lower())
-            allowed.update(a.strip().lower() for a in entries[idx].aliases)
+            allowed.update(a.text.strip().lower() for a in entries[idx].aliases)
         if valid and group.canonical.strip().lower() not in allowed:
             problems.append(
                 f"merge {gi}: canonical {group.canonical!r} is not a name/alias of any member"

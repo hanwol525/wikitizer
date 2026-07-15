@@ -113,7 +113,7 @@ def test_extract_happy_path_single_batch():
 
     assert client.call_count == 1
     assert [p.name for p in result] == ["The Krieg", "Direwolves"]
-    assert result[0].aliases == []
+    assert [a.text for a in result[0].aliases] == []
     assert [d.text for d in result[0].details] == [
         "A seafaring people from the northern coasts",
         "Their raiders are feared for their longships",
@@ -438,8 +438,8 @@ def test_aliases_sanitizers_drop_non_list_and_non_string_elements():
     result = agent.extract(messages)
 
     by_name = {p.name: p for p in result}
-    assert by_name["The Krieg"].aliases == []                              # not ['B', 'o', 'b']
-    assert by_name["The hill clans"].aliases == ["Highlanders", "The Clans"]
+    assert [a.text for a in by_name["The Krieg"].aliases] == []                              # not ['B', 'o', 'b']
+    assert [a.text for a in by_name["The hill clans"].aliases] == ["Highlanders", "The Clans"]
 
 
 def test_out_of_range_source_id_dropped_other_details_kept(caplog):

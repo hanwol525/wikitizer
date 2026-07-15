@@ -113,13 +113,13 @@ def test_extract_happy_path_single_batch():
 
     assert client.call_count == 1
     assert [it.name for it in result] == ["Amulet of Destiny", "Kriggy's family sword"]
-    assert result[0].aliases == ["the Amulet"]
+    assert [a.text for a in result[0].aliases] == ["the Amulet"]
     assert [d.text for d in result[0].details] == [
         "The only thing that can seal the rift",
         "Said to have been forged before the Maltraav-Kriega War",
     ]
     assert len(result[0].supporting_quotes) == 2
-    assert result[1].aliases == []
+    assert [a.text for a in result[1].aliases] == []
     assert [d.text for d in result[1].details] == ["Has been passed down for seven generations"]
     assert len(result[1].supporting_quotes) == 1
     assert all(isinstance(it, Item) for it in result)
@@ -439,8 +439,8 @@ def test_aliases_sanitizers_drop_non_list_and_non_string_elements():
     result = agent.extract(messages)
 
     by_name = {it.name: it for it in result}
-    assert by_name["Frostbite"].aliases == []                       # not ['B', 'o', 'b']
-    assert by_name["The Amulet"].aliases == ["Destiny", "The Seal"]
+    assert [a.text for a in by_name["Frostbite"].aliases] == []                       # not ['B', 'o', 'b']
+    assert [a.text for a in by_name["The Amulet"].aliases] == ["Destiny", "The Seal"]
 
 
 def test_out_of_range_source_id_dropped_other_details_kept(caplog):

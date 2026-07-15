@@ -123,7 +123,7 @@ def _matches(entity, needle):
     needle = needle.lower()
     if needle in entity.name.lower():
         return True
-    return any(isinstance(a, str) and needle in a.lower() for a in entity.aliases)
+    return any(needle in a.text.lower() for a in entity.aliases)
 
 
 def _apply_expectations(extractor_name, case_id, exp, result):

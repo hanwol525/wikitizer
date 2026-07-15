@@ -1,13 +1,68 @@
 import pytest
 from pydantic import ValidationError
 from models.lore import (
-    Quote, Detail, Location, Character, HistoryEvent, Scope,
+    Quote, Detail, Alias, Location, Character, HistoryEvent, Scope,
     Organization, Item, PeopleAndCultures,
 )
 
 
 def det(text, *source_files):
     return Detail(text=text, source_files=list(source_files))
+
+
+def al(text, *source_files):
+    return Alias(text=text, source_files=list(source_files))
+
+
+# --- Alias: the name-grain provenance twin of Detail -------------------------
+
+def test_alias_defaults_to_no_sources():
+    assert Alias(text="x").source_files == []
+
+
+def test_alias_round_trips_through_json_preserving_source_order():
+    a = Alias(text="x", source_files=["a.txt", "b.txt"])
+    again = Alias.model_validate_json(a.model_dump_json())
+    assert again == a
+    assert again.source_files == ["a.txt", "b.txt"]   # order preserved
+
+
+def test_two_aliases_dont_share_a_source_files_list():
+    a = Alias(text="x")
+    b = Alias(text="x")
+    a.source_files.append("a.txt")
+    assert b.source_files == []
+
+
+def test_entity_aliases_reject_bare_strings():
+    # The retype bites: `aliases` must be Alias objects now, not plain strings.
+    with pytest.raises(ValidationError):
+        Location(name="Lake Mundi", aliases=["a bare string"])
+
+
+# --- name_sources (a side field parallel to the scalar `name`) ---------------
+
+def test_name_sources_defaults_to_empty():
+    assert Location(name="X").name_sources == []
+
+
+def test_two_entities_dont_share_a_name_sources_list():
+    a = Location(name="A")
+    b = Location(name="B")
+    a.name_sources.append("a.txt")
+    assert b.name_sources == []
+
+
+@pytest.mark.parametrize("Model", [Location, Character, HistoryEvent,
+                                   Organization, Item, PeopleAndCultures])
+def test_all_six_types_accept_alias_objects_and_name_sources(Model):
+    kwargs = dict(name="X", name_sources=["a.txt"], aliases=[al("alt", "a.txt")])
+    if Model is HistoryEvent:
+        kwargs.update(description="d", scope="world")
+    obj = Model(**kwargs)
+    assert obj.name_sources == ["a.txt"]
+    assert [a.text for a in obj.aliases] == ["alt"]
+    assert obj.aliases[0].source_files == ["a.txt"]
 
 
 # --- Detail: the fact-grain provenance twin of Quote -------------------------
@@ -49,7 +104,7 @@ def test_quote_builds_with_all_fields():
 def test_location_with_quotes():
     loc = Location(
         name="Lake Mundi",
-        aliases=["The Great Well", "The Pond"],
+        aliases=[al("The Great Well"), al("The Pond")],
         details=[det("A massive central lake divided into three rings.")],
         supporting_quotes=[
             Quote(text="The Great Well. The Pond. Lake Mundi.",
@@ -71,14 +126,14 @@ def test_character_defaults():
 
 
 def test_character_with_aliases_round_trips():
-    kriggy = Character(name="Kriggy", aliases=["Kriggy Krieger"])
-    assert kriggy.aliases == ["Kriggy Krieger"]
+    kriggy = Character(name="Kriggy", aliases=[al("Kriggy Krieger")])
+    assert [a.text for a in kriggy.aliases] == ["Kriggy Krieger"]
 
 
 def test_two_characters_dont_share_an_aliases_list():
     a = Character(name="Kriggy")
     b = Character(name="Tiberius")
-    a.aliases.append("Kriggy Krieger")
+    a.aliases.append(al("Kriggy Krieger"))
     assert b.aliases == []
 
 
@@ -100,12 +155,12 @@ def test_history_event_unplaceable():
 def test_history_event_with_name_and_aliases_round_trips():
     event = HistoryEvent(
         name="The Maltraav-Kriega War",
-        aliases=["the Border War"],
+        aliases=[al("the Border War")],
         description="A brutal war between Maltraav and Kriega.",
         scope="regional",
     )
     assert event.name == "The Maltraav-Kriega War"
-    assert event.aliases == ["the Border War"]
+    assert [a.text for a in event.aliases] == ["the Border War"]
 
 
 def test_history_event_aliases_default_empty():
@@ -161,7 +216,7 @@ def test_scope_member_equals_its_text():
 def test_two_locations_dont_share_a_list():
     a = Location(name="Eglon")
     b = Location(name="Aprus")
-    a.aliases.append("capital city")
+    a.aliases.append(al("capital city"))
     assert b.aliases == []
 
 
@@ -187,14 +242,14 @@ def test_typed_lore_defaults(Model):
 
 @pytest.mark.parametrize("Model", [Organization, Item, PeopleAndCultures])
 def test_typed_lore_round_trips(Model):
-    obj = Model(name="Test", aliases=["alt"], details=[det("a fact")])
-    assert obj.name == "Test" and obj.aliases == ["alt"]
+    obj = Model(name="Test", aliases=[al("alt")], details=[det("a fact")])
+    assert obj.name == "Test" and [a.text for a in obj.aliases] == ["alt"]
 
 
 @pytest.mark.parametrize("Model", [Organization, Item, PeopleAndCultures])
 def test_typed_lore_no_shared_aliases_list(Model):
     a, b = Model(name="A"), Model(name="B")
-    a.aliases.append("x")
+    a.aliases.append(al("x"))
     assert b.aliases == []
 
 

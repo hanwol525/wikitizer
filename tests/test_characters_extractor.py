@@ -123,7 +123,7 @@ def test_happy_path_pc_and_npc():
     kriggy, tiberius = result
     assert kriggy.is_pc is True
     assert kriggy.player_name == "Sam"
-    assert kriggy.aliases == []
+    assert [a.text for a in kriggy.aliases] == []
     assert [d.text for d in kriggy.details] == [
         "The disgraced son of a noble house",
         "Younger brother of Emperor Tiberius",
@@ -156,7 +156,7 @@ def test_aliases_are_captured():
     result = agent.extract(messages)
 
     assert len(result) == 1
-    assert result[0].aliases == ["Kriggy Krieger"]
+    assert [a.text for a in result[0].aliases] == ["Kriggy Krieger"]
 
 
 def test_aliases_are_defended():
@@ -167,7 +167,7 @@ def test_aliases_are_defended():
          "player_name": None, "details": []},
     ])
     agent = make_agent([response_filtered], player_names={"Sam"})
-    assert agent.extract(messages)[0].aliases == ["Kriggy Krieger"]
+    assert [a.text for a in agent.extract(messages)[0].aliases] == ["Kriggy Krieger"]
 
     # ...and a non-list aliases becomes [] rather than crashing.
     response_nonlist = json.dumps([
@@ -175,7 +175,7 @@ def test_aliases_are_defended():
          "player_name": None, "details": []},
     ])
     agent = make_agent([response_nonlist], player_names={"Sam"})
-    assert agent.extract(messages)[0].aliases == []
+    assert [a.text for a in agent.extract(messages)[0].aliases] == []
 
 
 # --- player_name roster check -----------------------------------------------
