@@ -19,7 +19,10 @@ import re
 import pytest
 from pydantic import ValidationError
 
-from models.lore import Location, Character, HistoryEvent, Quote, Scope, Detail, Alias
+from models.lore import (
+    Location, Character, HistoryEvent, Quote, Scope, Detail, Alias,
+    Organization, Item, PeopleAndCultures,
+)
 from models.reconcile import (
     ReconcileDecision, MergeGroup, DetailConflict, PossibleDuplicate,
     DateDecision, DatedEvent, PlacementDecision, GapPlacement,
@@ -1133,3 +1136,36 @@ def test_entity_for_prompt_reduces_aliases_hides_provenance_keeps_key_order():
     assert "source_files" not in blob and "name_sources" not in blob and "secret.txt" not in blob
     # key order unchanged (name_sources popped, others in place) -> prompt cache still hits
     assert list(data) == ["name", "aliases", "details", "supporting_quotes"]
+
+
+# HARDCODED expected merge-prompt key order per type -- deliberately NOT computed from
+# Model.model_fields. `model_dump` emits keys in model_fields order, so deriving the
+# expected list from model_fields would be tautological (both sides move together and
+# catch nothing). A hardcoded reference means a field REORDER on ANY type -- e.g.
+# `details` before `aliases` on Character, which shifts the JSON bytes the reconciler
+# serialises into the merge prompt and its sha256 cache key -- flips the test RED.
+_PROMPT_KEY_ORDER = {
+    Location:          ["name", "aliases", "details", "supporting_quotes"],
+    Organization:      ["name", "aliases", "details", "supporting_quotes"],
+    Item:              ["name", "aliases", "details", "supporting_quotes"],
+    PeopleAndCultures: ["name", "aliases", "details", "supporting_quotes"],
+    Character:         ["name", "aliases", "is_pc", "player_name", "details", "supporting_quotes"],
+    HistoryEvent:      ["name", "aliases", "description", "scope", "date_text",
+                        "calendar_system", "chronological_position", "supporting_quotes"],
+}
+
+
+@pytest.mark.parametrize("Model", list(_PROMPT_KEY_ORDER))
+def test_entity_for_prompt_key_order_is_stable_all_types(Model):
+    # _entity_for_prompt must yield a byte-identical merge prompt for every type (same
+    # keys, same order, name_sources dropped, details/aliases reduced to bare text), so
+    # the reconciler's prompt cache keeps hitting. The Location-only test above pins
+    # Location against a hardcoded list; this extends that real guard to the other five.
+    kwargs = dict(name="X", name_sources=["secret.txt"], aliases=[al("aka", "secret.txt")])
+    if Model is HistoryEvent:
+        kwargs.update(description="d", scope="world")
+    else:
+        kwargs.update(details=[det("f", "secret.txt")])
+    data = _entity_for_prompt(Model(**kwargs))
+    assert list(data) == _PROMPT_KEY_ORDER[Model]        # hardcoded ref -> catches a reorder
+    assert "name_sources" not in json.dumps(data) and "source_files" not in json.dumps(data)
