@@ -35,9 +35,10 @@ class Detail(BaseModel):
     only when EVERY one of its sources is excluded. A single string couldn't say
     "this fact is public AND secret".
 
-    Nothing reads ``source_files`` yet -- it's dormant plumbing for ``--exclude-
-    sources``. Rendering ignores it and uses only ``text``, which is why adding it
-    changes nothing you can see in the wiki.
+    The FULL wiki ignores ``source_files`` -- rendering uses only ``text`` -- so it
+    is invisible there; the ``--exclude-sources`` restricted view
+    (``exclusion.filter_entities``) reads it to carve confidential facts out of a
+    second doc.
     """
     text: str
     source_files: list[str] = Field(default_factory=list)
