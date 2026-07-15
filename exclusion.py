@@ -12,26 +12,22 @@ extraction over the non-excluded messages (a secret can't leak because the
 extractor never sees it). This module only touches the five fact-carrying entity
 types (Location / Character / Organization / Item / PeopleAndCultures).
 
-KNOWN LIMITATION -- entity NAME/ALIAS leak (confirmed by adversarial review, fix
-DEFERRED to a follow-up brief). Carving scrubs ``details`` and ``supporting_quotes``,
-which carry source provenance (``Detail.source_files`` / ``Quote.source_file``). An
-entity's ``name`` and ``aliases`` are bare strings with NO provenance, so they can't
-be scrubbed here: a SURVIVING entity (kept because it has any public fact/quote)
-whose canonical name -- or an alias -- originated *solely* from an excluded file will
-still show that name in the restricted doc's heading, anchor id, and cross-link
-table. Two reachable paths: (a) the reconciler prefers a proper name as canonical,
-so a public "the old fort" merged with a secret "Blackspire Keep" heads the merged
-entity with the secret name; (b) the org/item/people fallback sets ``name`` to a
-detail's text, which can be a secret fact. The leak-proof fix is to RE-EXTRACT the
-five entity types over the non-excluded messages (exactly how History is handled
-above), or to give names/aliases their own provenance and scrub/re-head here; both
-are out of the current brief's scope. Tracked by the xfail regression test
-``test_restricted_doc_leaks_secret_derived_entity_name_KNOWN_GAP`` in
-tests/test_orchestrator.py, which flips to passing once the gap is closed.
+Names and aliases now carry provenance too (Part 3): ``name_sources`` on each entity
+and ``Alias.source_files``, both tagged at extraction from the entry's file-pure
+batch. So the carve also strips secret-only aliases and, when the canonical name
+isn't provably public, RE-HEADS the entity to its first surviving public alias --
+closing the entity-name leak an earlier review found. See ``_filter_entity``.
 """
 
+import logging
 from collections import Counter
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
+
+# Same convention as the agents/renderer/orchestrator: loud, human-actionable flags
+# carry this prefix so the Phase 5 review pass can find them.
+REVIEW_PREFIX = "[REVIEW]"
 
 
 def validate_exclusions(exclude_sources: list[str], files: list[str]) -> None:
@@ -77,20 +73,32 @@ def validate_exclusions(exclude_sources: list[str], files: list[str]) -> None:
 
 
 def _filter_entity(entity, excluded):
-    """Return a COPY of `entity` with confidential-only facts and confidential
-    quotes removed -- or None if nothing public survives (drop the whole entity).
+    """Return a COPY of `entity` with confidential-only facts, quotes and aliases
+    removed and -- if its canonical name isn't provably public -- re-headed to a
+    surviving public alias. Returns None if nothing public survives.
 
     `excluded` is a set of bare filenames. Rules:
       * Keep a Detail if AT LEAST ONE of its source_files is NOT excluded (the fact
         is also public). A Detail with no sources at all is dropped -- we can't prove
         it's public, and over-hiding is the safe direction for a secrecy feature.
       * Keep a Quote if its (single) source_file is NOT excluded.
-      * Keep the entity if it still has any Detail OR any Quote; else drop it.
+      * Drop the entity if it has neither a surviving Detail nor a surviving Quote.
+      * Keep an Alias on the same any-source-public rule as a Detail.
+      * If `name` isn't provably public (no non-excluded entry in `name_sources`, or
+        no sources at all), PROMOTE the first surviving alias to be the heading. The
+        old secret name is dropped outright, not demoted to an alias.
+
+    The promotion can't run out of options -- see INVARIANT 2 in the brief: a
+    surviving public detail/quote belongs to a member from a public file, and
+    `_combine_group` folds every losing member name into the alias pool, so a public
+    alias is always there. We still handle the impossible case by dropping + logging
+    [REVIEW], because a broken invariant must be loud rather than silently leaky.
 
     Builds a NEW object via model_copy so the reconciled originals (which the FULL
     doc still needs) are never mutated. One code path works for all five types
     uniformly: model_copy carries every other field through untouched, including a
-    Character's is_pc / player_name.
+    Character's is_pc / player_name. HistoryEvent never reaches here -- it has no
+    `details`, and the orchestrator re-runs its extraction instead of carving it.
     """
     kept_details = [d for d in entity.details
                     if any(sf not in excluded for sf in d.source_files)]
@@ -98,7 +106,34 @@ def _filter_entity(entity, excluded):
                    if q.source_file not in excluded]
     if not kept_details and not kept_quotes:
         return None
-    return entity.model_copy(update={"details": kept_details,
+
+    kept_aliases = [a for a in entity.aliases
+                    if any(sf not in excluded for sf in a.source_files)]
+
+    name = entity.name
+    name_sources = entity.name_sources
+    if not any(sf not in excluded for sf in name_sources):
+        # The heading came solely from an excluded file (or carries no provenance at
+        # all, which we treat identically -- can't prove it's public).
+        if not kept_aliases:
+            logger.warning(
+                "%s No public name for entity %r after exclusion, and no public alias to "
+                "re-head to -- dropping it. This should be impossible (a surviving public "
+                "fact implies a public member name in the alias pool); check whether "
+                "extractor batches are still file-pure.", REVIEW_PREFIX, entity.name,
+            )
+            return None
+        promoted = kept_aliases[0]      # first-seen order
+        logger.debug("Exclusion: re-heading %r -> %r (canonical was source-excluded)",
+                     entity.name, promoted.text)
+        name = promoted.text
+        name_sources = promoted.source_files   # kept as-is, never rewritten
+        kept_aliases = kept_aliases[1:]        # the new heading shouldn't alias itself
+
+    return entity.model_copy(update={"name": name,
+                                     "name_sources": name_sources,
+                                     "aliases": kept_aliases,
+                                     "details": kept_details,
                                      "supporting_quotes": kept_quotes})
 
 

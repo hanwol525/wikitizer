@@ -35,7 +35,7 @@ from typing import Optional
 from pydantic import ValidationError
 
 from agents.base_extractor import BaseExtractor
-from models.lore import HistoryEvent, Scope
+from models.lore import Alias, HistoryEvent, Scope
 from models.message import Message
 
 logger = logging.getLogger(__name__)
@@ -130,9 +130,12 @@ class HistoryExtractor(BaseExtractor):
                 "name. description=%r", description,
             )
 
-        # 3. aliases -- same defensive line as the other two extractors.
+        # 3. aliases -- same defensive line as the other two extractors. Batches are
+        # file-pure (BaseExtractor.extract), so ONE file owns every name/alias/quote.
+        source = batch[0].source_file
         raw_aliases = raw.get("aliases")
-        aliases = [a for a in raw_aliases if isinstance(a, str)] if isinstance(raw_aliases, list) else []
+        aliases = ([Alias(text=a, source_files=[source]) for a in raw_aliases if isinstance(a, str)]
+                   if isinstance(raw_aliases, list) else [])
 
         # 4. scope -- coerce to an allowed value (case/space-forgiving), defaulting
         # unknowns to "world" so a misfile surfaces for review instead of hiding.
@@ -193,6 +196,7 @@ class HistoryExtractor(BaseExtractor):
         try:
             return HistoryEvent(
                 name=name,
+                name_sources=[source],
                 aliases=aliases,
                 description=description,
                 scope=scope,

@@ -32,7 +32,7 @@ from typing import Optional
 from pydantic import ValidationError
 
 from agents.base_extractor import BaseExtractor
-from models.lore import Detail, Item
+from models.lore import Alias, Detail, Item
 from models.message import Message
 
 logger = logging.getLogger(__name__)
@@ -98,7 +98,11 @@ class ItemExtractor(BaseExtractor):
         """
         # aliases -- string-only, and a non-list value becomes [] instead of crashing.
         raw_aliases = raw.get("aliases")
-        aliases = [a for a in raw_aliases if isinstance(a, str)] if isinstance(raw_aliases, list) else []
+        # Batches are file-pure (BaseExtractor.extract), so ONE file owns every
+        # name, alias, detail and quote in this batch.
+        source = batch[0].source_file
+        aliases = ([Alias(text=a, source_files=[source]) for a in raw_aliases if isinstance(a, str)]
+                   if isinstance(raw_aliases, list) else [])
 
         # details FIRST (the name fallback derives from them). Non-list -> empty, never crash.
         raw_details = raw.get("details", [])
@@ -144,7 +148,7 @@ class ItemExtractor(BaseExtractor):
 
         try:
             return Item(
-                name=name, aliases=aliases, details=details_out, supporting_quotes=quotes_out,
+                name=name, name_sources=[source], aliases=aliases, details=details_out, supporting_quotes=quotes_out,
             )
         except ValidationError as exc:
             logger.warning("Item failed model validation, skipping. name=%r error=%s", name, exc)

@@ -129,7 +129,7 @@ def test_happy_path_three_events():
     ]
     assert all(isinstance(e, HistoryEvent) for e in result)
     assert [e.scope for e in result] == [Scope.WORLD, Scope.REGIONAL, Scope.PERSONAL]
-    assert result[1].aliases == ["the Border War"]
+    assert [a.text for a in result[1].aliases] == ["the Border War"]
     assert result[1].description.startswith("A brutal war fought between Maltraav and Kriega")
     # chronological_position is never set by the extractor
     assert all(e.chronological_position is None for e in result)
@@ -299,21 +299,21 @@ def test_aliases_captured_and_defended():
          "description": "A war happened.", "scope": "regional",
          "quotes": [{"quote": "the war happened", "source_id": 0}]},
     ])
-    assert make_agent([captured]).extract(messages)[0].aliases == ["the Border War"]
+    assert [a.text for a in make_agent([captured]).extract(messages)[0].aliases] == ["the Border War"]
 
     filtered = json.dumps([
         {"name": "The War", "aliases": ["x", 5, None],
          "description": "A war happened.", "scope": "regional",
          "quotes": [{"quote": "the war happened", "source_id": 0}]},
     ])
-    assert make_agent([filtered]).extract(messages)[0].aliases == ["x"]
+    assert [a.text for a in make_agent([filtered]).extract(messages)[0].aliases] == ["x"]
 
     nonlist = json.dumps([
         {"name": "The War", "aliases": "notalist",
          "description": "A war happened.", "scope": "regional",
          "quotes": [{"quote": "the war happened", "source_id": 0}]},
     ])
-    assert make_agent([nonlist]).extract(messages)[0].aliases == []
+    assert [a.text for a in make_agent([nonlist]).extract(messages)[0].aliases] == []
 
 
 # --- chronological_position is never read through ---------------------------

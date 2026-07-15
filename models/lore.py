@@ -44,15 +44,51 @@ class Detail(BaseModel):
     source_files: list[str] = Field(default_factory=list)
 
 
+class Alias(BaseModel):
+    """One alternative name for an entity, plus where it came from.
+
+    The name-grain twin of ``Detail``. ``text`` is the alias string that used to
+    live bare in ``aliases: list[str]``; ``source_files`` records which chat-log
+    file(s) stated it.
+
+    ``source_files`` is a LIST for exactly ``Detail``'s reason: when the reconciler
+    merges two mentions of one entity and finds the SAME alias stated in two files,
+    it collapses them into one ``Alias``, and that survivor must remember BOTH -- so
+    an exclusion drops it only when EVERY one of its sources is excluded.
+
+    Aliases are never rendered into the wiki (they only feed the cross-link source
+    pool), so this provenance exists mainly so the exclusion carve can find a PUBLIC
+    alias to re-head an entity whose canonical name was secret. Stripping secret
+    aliases is defence-in-depth on top: harmless today, essential the moment
+    anything renders them (an "also known as" heading, a disambiguation page).
+    """
+    text: str
+    source_files: list[str] = Field(default_factory=list)
+
+
 class Location(BaseModel):
     name: str
-    aliases: list[str] = Field(default_factory=list)
+    # Which chat-log file(s) stated `name`. A side field parallel to the scalar
+    # `name` (a scalar has no index-mapping problem, and this keeps every `.name`
+    # read-site untouched). Read only by the exclusion carve, which re-heads an
+    # entity whose name isn't provably public. Declared right after `name` so
+    # `_entity_for_prompt`'s JSON key order stays stable. Dormant on HistoryEvent
+    # (History is re-run, not carved) -- carried so all six types share one shape.
+    name_sources: list[str] = Field(default_factory=list)
+    aliases: list[Alias] = Field(default_factory=list)
     details: list[Detail] = Field(default_factory=list)
     supporting_quotes: list[Quote] = Field(default_factory=list)
 
 class Character(BaseModel):
     name: str
-    aliases: list[str] = Field(default_factory=list)
+    # Which chat-log file(s) stated `name`. A side field parallel to the scalar
+    # `name` (a scalar has no index-mapping problem, and this keeps every `.name`
+    # read-site untouched). Read only by the exclusion carve, which re-heads an
+    # entity whose name isn't provably public. Declared right after `name` so
+    # `_entity_for_prompt`'s JSON key order stays stable. Dormant on HistoryEvent
+    # (History is re-run, not carved) -- carried so all six types share one shape.
+    name_sources: list[str] = Field(default_factory=list)
+    aliases: list[Alias] = Field(default_factory=list)
     is_pc: bool = False
     player_name: Optional[str] = None
     details: list[Detail] = Field(default_factory=list)
@@ -60,7 +96,14 @@ class Character(BaseModel):
 
 class HistoryEvent(BaseModel):
     name: str
-    aliases: list[str] = Field(default_factory=list)
+    # Which chat-log file(s) stated `name`. A side field parallel to the scalar
+    # `name` (a scalar has no index-mapping problem, and this keeps every `.name`
+    # read-site untouched). Read only by the exclusion carve, which re-heads an
+    # entity whose name isn't provably public. Declared right after `name` so
+    # `_entity_for_prompt`'s JSON key order stays stable. Dormant on HistoryEvent
+    # (History is re-run, not carved) -- carried so all six types share one shape.
+    name_sources: list[str] = Field(default_factory=list)
+    aliases: list[Alias] = Field(default_factory=list)
     description: str
     scope: Scope
     # The date EXACTLY as the campaign stated it ("342 AR", "the Third Age",
@@ -92,13 +135,27 @@ class HistoryEvent(BaseModel):
 
 class Organization(BaseModel):
     name: str
-    aliases: list[str] = Field(default_factory=list)
+    # Which chat-log file(s) stated `name`. A side field parallel to the scalar
+    # `name` (a scalar has no index-mapping problem, and this keeps every `.name`
+    # read-site untouched). Read only by the exclusion carve, which re-heads an
+    # entity whose name isn't provably public. Declared right after `name` so
+    # `_entity_for_prompt`'s JSON key order stays stable. Dormant on HistoryEvent
+    # (History is re-run, not carved) -- carried so all six types share one shape.
+    name_sources: list[str] = Field(default_factory=list)
+    aliases: list[Alias] = Field(default_factory=list)
     details: list[Detail] = Field(default_factory=list)
     supporting_quotes: list[Quote] = Field(default_factory=list)
 
 class Item(BaseModel):
     name: str
-    aliases: list[str] = Field(default_factory=list)
+    # Which chat-log file(s) stated `name`. A side field parallel to the scalar
+    # `name` (a scalar has no index-mapping problem, and this keeps every `.name`
+    # read-site untouched). Read only by the exclusion carve, which re-heads an
+    # entity whose name isn't provably public. Declared right after `name` so
+    # `_entity_for_prompt`'s JSON key order stays stable. Dormant on HistoryEvent
+    # (History is re-run, not carved) -- carried so all six types share one shape.
+    name_sources: list[str] = Field(default_factory=list)
+    aliases: list[Alias] = Field(default_factory=list)
     details: list[Detail] = Field(default_factory=list)
     supporting_quotes: list[Quote] = Field(default_factory=list)
 
@@ -106,6 +163,13 @@ class Item(BaseModel):
 # the renderer (a Python name can't hold a space or the bare word `and`).
 class PeopleAndCultures(BaseModel):
     name: str
-    aliases: list[str] = Field(default_factory=list)
+    # Which chat-log file(s) stated `name`. A side field parallel to the scalar
+    # `name` (a scalar has no index-mapping problem, and this keeps every `.name`
+    # read-site untouched). Read only by the exclusion carve, which re-heads an
+    # entity whose name isn't provably public. Declared right after `name` so
+    # `_entity_for_prompt`'s JSON key order stays stable. Dormant on HistoryEvent
+    # (History is re-run, not carved) -- carried so all six types share one shape.
+    name_sources: list[str] = Field(default_factory=list)
+    aliases: list[Alias] = Field(default_factory=list)
     details: list[Detail] = Field(default_factory=list)
     supporting_quotes: list[Quote] = Field(default_factory=list)

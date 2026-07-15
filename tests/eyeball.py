@@ -39,7 +39,7 @@ def format_entities(entities, title):
         if isinstance(e, Character):
             header += f"   [PC · player: {e.player_name or '??'}]" if e.is_pc else "   [NPC]"
         out.append(header + "\n")
-        out.append(f"   aka: {', '.join(e.aliases) if e.aliases else '—'}\n")
+        out.append(f"   aka: {', '.join(a.text for a in e.aliases) if e.aliases else '—'}\n")
 
         if isinstance(e, HistoryEvent):
             pos = e.chronological_position
@@ -53,7 +53,7 @@ def format_entities(entities, title):
             out.append("   facts:\n")
             if e.details:
                 for d in e.details:
-                    out.append(_wrap("- " + d, "     ") + "\n")
+                    out.append(_wrap("- " + d.text, "     ") + "\n")
             else:
                 out.append("     (none)\n")
 

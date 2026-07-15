@@ -7,6 +7,7 @@ runs offline. Every fixture is fabricated synthetic lore; every assertion exact.
 """
 
 from models.lore import (
+    Alias,
     Character,
     Detail,
     HistoryEvent,
@@ -24,6 +25,12 @@ from renderer.markdown import render_history, render_wiki
 
 # --- tiny builders ---------------------------------------------------------- #
 
+def _aliases(aliases):
+    """Accept bare strings or real Aliases so existing fixtures don't need touching."""
+    return [Alias(text=a, source_files=[]) if isinstance(a, str) else a
+            for a in (aliases or [])]
+
+
 def hev(name, description="An event happened.", calendar_system=None,
         chronological_position=None, date_text=None, aliases=None, quotes=None):
     # Build a HistoryEvent with the stamped fields set directly, as if the weave
@@ -36,14 +43,14 @@ def hev(name, description="An event happened.", calendar_system=None,
         date_text=date_text,
         calendar_system=calendar_system,
         chronological_position=chronological_position,
-        aliases=aliases or [],
+        aliases=_aliases(aliases),
         supporting_quotes=quotes or [],
     )
 
 
 def loc(name, aliases=None):
     # A minimal Location, same as test_crosslink.py's builder.
-    return Location(name=name, aliases=aliases or [])
+    return Location(name=name, aliases=_aliases(aliases))
 
 
 def det(text, *source_files):

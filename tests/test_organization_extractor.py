@@ -119,13 +119,13 @@ def test_extract_happy_path_single_batch():
 
     assert client.call_count == 1
     assert [o.name for o in result] == ["Krieger Imperium", "Tansy's Adventuring Agency"]
-    assert result[0].aliases == ["the Imperium"]
+    assert [a.text for a in result[0].aliases] == ["the Imperium"]
     assert [d.text for d in result[0].details] == [
         "Controls almost every country southeast of the Cloud Mountains",
         "Ruled by Emperor Tiberius and his war council",
     ]
     assert len(result[0].supporting_quotes) == 2
-    assert result[1].aliases == []
+    assert [a.text for a in result[1].aliases] == []
     assert [d.text for d in result[1].details] == ["Takes contracts out of Crown's Nest"]
     assert len(result[1].supporting_quotes) == 1
     assert all(isinstance(o, Organization) for o in result)
@@ -174,6 +174,59 @@ def test_extract_batches_with_ceil_calls_and_resets_ids():
     assert [o["content"] for o in second_payload] == ["msg 2", "msg 3"]
     assert [o["id"] for o in third_payload] == [0]
     assert third_payload[0]["content"] == "msg 4"
+
+
+# --- Phase 4.6 Part 3: file-pure batching (the exclusion feature depends on it) --
+# BaseExtractor.extract groups by source_file BEFORE chunking, so no batch mixes two
+# files. This is load-bearing: a mixed batch lets Claude cite a public quote while
+# weaving in a secret fact, silently defeating --exclude-sources.
+
+def test_batches_never_mix_files():
+    messages = ([make_message(f"a{i}", source_file="a.txt") for i in range(3)]
+                + [make_message(f"b{i}", source_file="b.txt") for i in range(3)])
+    client = FakeClient(["[]"])
+    agent = OrganizationExtractor(client=client, batch_size=20)
+    agent.extract(messages)
+
+    assert client.call_count == 2                     # one batch per file, NOT one combined
+    p0 = json.loads(client.messages.calls[0]["messages"][0]["content"])
+    p1 = json.loads(client.messages.calls[1]["messages"][0]["content"])
+    assert [o["content"] for o in p0] == ["a0", "a1", "a2"]   # a.txt alone
+    assert [o["content"] for o in p1] == ["b0", "b1", "b2"]   # b.txt alone
+
+
+def test_per_file_chunking_resets_ids_within_each_file():
+    messages = ([make_message(f"a{i}", source_file="a.txt") for i in range(3)]
+                + [make_message(f"b{i}", source_file="b.txt") for i in range(3)])
+    client = FakeClient(["[]"])
+    agent = OrganizationExtractor(client=client, batch_size=2)
+    agent.extract(messages)
+
+    assert client.call_count == 4                     # 2 batches per file
+    payloads = [json.loads(c["messages"][0]["content"]) for c in client.messages.calls]
+    assert [[o["content"] for o in p] for p in payloads] == [
+        ["a0", "a1"], ["a2"], ["b0", "b1"], ["b2"],   # a.txt fully chunked, then b.txt
+    ]
+    assert [o["id"] for o in payloads[0]] == [0, 1]
+    assert [o["id"] for o in payloads[2]] == [0, 1]   # b.txt's first batch ids reset too
+
+
+def test_interleaved_files_are_separated_into_one_batch_each():
+    # a, b, a, b -> one a.txt batch and one b.txt batch, first-seen file order, each
+    # file's messages in original order.
+    messages = [make_message("a0", source_file="a.txt"),
+                make_message("b0", source_file="b.txt"),
+                make_message("a1", source_file="a.txt"),
+                make_message("b1", source_file="b.txt")]
+    client = FakeClient(["[]"])
+    agent = OrganizationExtractor(client=client, batch_size=20)
+    agent.extract(messages)
+
+    assert client.call_count == 2
+    p0 = json.loads(client.messages.calls[0]["messages"][0]["content"])
+    p1 = json.loads(client.messages.calls[1]["messages"][0]["content"])
+    assert [o["content"] for o in p0] == ["a0", "a1"]   # a.txt first-seen, its order kept
+    assert [o["content"] for o in p1] == ["b0", "b1"]
 
 
 def test_payload_preserves_non_ascii_content_via_ensure_ascii_false():
@@ -445,8 +498,8 @@ def test_aliases_sanitizers_drop_non_list_and_non_string_elements():
     result = agent.extract(messages)
 
     by_name = {o.name: o for o in result}
-    assert by_name["The Guild"].aliases == []                       # not ['B', 'o', 'b']
-    assert by_name["The Order"].aliases == ["The Dawn", "Dawn Order"]
+    assert [a.text for a in by_name["The Guild"].aliases] == []                       # not ['B', 'o', 'b']
+    assert [a.text for a in by_name["The Order"].aliases] == ["The Dawn", "Dawn Order"]
 
 
 def test_out_of_range_source_id_dropped_other_details_kept(caplog):

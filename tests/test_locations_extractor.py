@@ -143,9 +143,9 @@ def test_extract_happy_path_single_batch():
 
     assert client.call_count == 1
     assert [loc.name for loc in result] == ["Lake Mundi", "Cloud Mountains"]
-    assert result[0].aliases == ["The Great Well", "The Pond"]
+    assert [a.text for a in result[0].aliases] == ["The Great Well", "The Pond"]
     assert [d.text for d in result[0].details] == ["A massive central lake divided into three rings"]
-    assert result[1].aliases == []
+    assert [a.text for a in result[1].aliases] == []
     assert [d.text for d in result[1].details] == [
         "Countries to their southeast are controlled by the Krieger Imperium"
     ]
@@ -469,8 +469,8 @@ def test_aliases_sanitizers_drop_non_list_and_non_string_elements():
     result = agent.extract(messages)
 
     by_name = {loc.name: loc for loc in result}
-    assert by_name["Gol"].aliases == []                          # not ['B', 'o', 'b']
-    assert by_name["Eglon"].aliases == ["The Keep", "Old Eglon"]  # ints/None dropped
+    assert [a.text for a in by_name["Gol"].aliases] == []                          # not ['B', 'o', 'b']
+    assert [a.text for a in by_name["Eglon"].aliases] == ["The Keep", "Old Eglon"]  # ints/None dropped
 
 
 def test_out_of_range_source_id_dropped_other_details_kept(caplog):

@@ -15,6 +15,7 @@ import logging
 import pytest
 
 from models.lore import (
+    Alias,
     Character,
     HistoryEvent,
     Item,
@@ -34,35 +35,42 @@ from renderer.crosslink import (
 
 # --- tiny builders ---------------------------------------------------------- #
 
+def _aliases(aliases):
+    """Test convenience: accept bare strings (provenance-free) or real Aliases, so
+    the existing `aliases=["The Pond"]` fixtures don't need touching."""
+    return [Alias(text=a, source_files=[]) if isinstance(a, str) else a
+            for a in (aliases or [])]
+
+
 def loc(name, aliases=None):
-    return Location(name=name, aliases=aliases or [])
+    return Location(name=name, aliases=_aliases(aliases))
 
 
 def char(name, aliases=None):
-    return Character(name=name, aliases=aliases or [])
+    return Character(name=name, aliases=_aliases(aliases))
 
 
 def org(name, aliases=None):
-    return Organization(name=name, aliases=aliases or [])
+    return Organization(name=name, aliases=_aliases(aliases))
 
 
 def item(name, aliases=None):
-    return Item(name=name, aliases=aliases or [])
+    return Item(name=name, aliases=_aliases(aliases))
 
 
 def people(name, aliases=None):
-    return PeopleAndCultures(name=name, aliases=aliases or [])
+    return PeopleAndCultures(name=name, aliases=_aliases(aliases))
 
 
 def event(name, description, aliases=None):
-    return HistoryEvent(name=name, description=description, scope=Scope.WORLD, aliases=aliases or [])
+    return HistoryEvent(name=name, description=description, scope=Scope.WORLD, aliases=_aliases(aliases))
 
 
 def hev(name, aliases=None):
     # Same move as tests/test_reconciler.py's hev: the required description + scope
     # get simple filler, because the crosslink map only ever reads name + aliases.
     return HistoryEvent(name=name, description=f"{name} happened.", scope=Scope.WORLD,
-                        aliases=aliases or [])
+                        aliases=_aliases(aliases))
 
 
 def surfaces(cmap):

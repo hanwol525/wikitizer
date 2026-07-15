@@ -19,7 +19,7 @@ import re
 import pytest
 from pydantic import ValidationError
 
-from models.lore import Location, Character, HistoryEvent, Quote, Scope, Detail
+from models.lore import Location, Character, HistoryEvent, Quote, Scope, Detail, Alias
 from models.reconcile import (
     ReconcileDecision, MergeGroup, DetailConflict, PossibleDuplicate,
     DateDecision, DatedEvent, PlacementDecision, GapPlacement,
@@ -27,7 +27,7 @@ from models.reconcile import (
 from agents.reconciler import (
     Reconciler, _combine_group, _resolve_scope, _resolve_player_name,
     _short_name_veto, _validate_decision, _dedup_quotes, _dedup_details,
-    _entity_for_prompt, _VetoMerge,
+    _dedup_aliases, _canonical_sources, _entity_for_prompt, _VetoMerge,
     _resolve_canonical, _extract_json_object, REVIEW_PREFIX, _resolve_date_text,
     _sanity_guard_parts, _validate_date_decision, _build_spine_and_gaps,
     _validate_placement_decision, _weave_and_stamp, UNDATED,
@@ -42,8 +42,18 @@ def det(text, *source_files):
     return Detail(text=text, source_files=list(source_files))
 
 
+def al(text, *source_files):
+    return Alias(text=text, source_files=list(source_files))
+
+
+def _aliases(aliases):
+    """Accept bare strings (provenance-free) or real Aliases."""
+    return [Alias(text=a, source_files=[]) if isinstance(a, str) else a
+            for a in (aliases or [])]
+
+
 def loc(name, aliases=None, details=None, quotes=None):
-    return Location(name=name, aliases=aliases or [], details=details or [],
+    return Location(name=name, aliases=_aliases(aliases), details=details or [],
                     supporting_quotes=quotes or [])
 
 
@@ -59,8 +69,8 @@ def test_combine_unions_aliases_and_keeps_losing_name():
     merged = _combine_group([a, b], "Lake Mundi")
     assert merged.name == "Lake Mundi"
     # losing name + all aliases present; canonical not in its own alias list
-    assert set(merged.aliases) == {"The Great Well", "The Pond", "The Well"}
-    assert "Lake Mundi" not in merged.aliases
+    assert {a.text for a in merged.aliases} == {"The Great Well", "The Pond", "The Well"}
+    assert "Lake Mundi" not in [a.text for a in merged.aliases]
 
 
 # --- combine: details (same-fact de-dup, sources unioned, order preserved) -
@@ -386,17 +396,17 @@ def test_combine_snaps_recased_canonical_and_does_not_demote_real_name():
     b = loc("The Great Well")
     merged = _combine_group([a, b], "  lake mundi ")  # LLM recased + padded the canonical
     assert merged.name == "Lake Mundi"            # the verbatim member name, not the LLM string
-    assert "Lake Mundi" not in merged.aliases     # the real name was NOT demoted to an alias
-    assert set(merged.aliases) == {"The Pond", "The Great Well"}
+    assert "Lake Mundi" not in [a.text for a in merged.aliases]  # real name NOT demoted to an alias
+    assert {a.text for a in merged.aliases} == {"The Pond", "The Great Well"}
 
 
 # === BUG 3: a self-alias is not a cross-member stated link ==================
 def test_short_name_veto_self_alias_is_not_a_stated_link():
     # A short name listing ITSELF in its own aliases must not satisfy the
     # stated-alias rule -- otherwise CJ(aliases=['CJ']) + DJ would wrongly merge.
-    assert _short_name_veto([Character(name="CJ", aliases=["CJ"]), Character(name="DJ")]) is True
-    assert _short_name_veto([Character(name="AB", aliases=["AB"]),
-                             Character(name="CD", aliases=["CD"])]) is True
+    assert _short_name_veto([Character(name="CJ", aliases=[al("CJ")]), Character(name="DJ")]) is True
+    assert _short_name_veto([Character(name="AB", aliases=[al("AB")]),
+                             Character(name="CD", aliases=[al("CD")])]) is True
 
 
 # === BUG 4 (live-test root cause): parse robustly around fences/preambles ====
@@ -441,7 +451,7 @@ def test_reconcile_clean_merge_collapses_two_to_one():
     result = rec.reconcile(_typo_pair())
     assert len(result) == 1
     assert result[0].name == "Maltraav"
-    assert "Maltaav" in result[0].aliases  # losing name preserved as an alias
+    assert "Maltaav" in [a.text for a in result[0].aliases]  # losing name preserved as an alias
 
 
 def test_reconcile_prompt_never_carries_source_files_end_to_end():
@@ -580,8 +590,8 @@ def test_combine_three_members_unions_all_aliases_and_dedups_quotes():
             quotes=[q("by the water", speaker="player_b")])
     merged = _combine_group([a, b, c], "Riverton")
     assert merged.name == "Riverton"
-    assert set(merged.aliases) == {"The River", "Rivertown", "River City"}
-    assert "Riverton" not in merged.aliases
+    assert {a.text for a in merged.aliases} == {"The River", "Rivertown", "River City"}
+    assert "Riverton" not in [a.text for a in merged.aliases]
     assert len(merged.supporting_quotes) == 2  # the two identical "at Riverton" collapse to one
 
 
@@ -1067,3 +1077,59 @@ def test_build_placement_message_marks_ties_on_one_line():
     assert "Founding (1300), Charter (1300)" in msg          # one shared marker line
     gap_tokens = re.findall(r"\[gap (.+?)\]", msg)
     assert {"AR#0", "AR#1", f"{UNDATED}#0"} == set(gap_tokens)  # tie -> only AR#0, AR#1
+
+
+# ===========================================================================
+# Phase 4.6 Part 3: alias/name provenance (Alias objects + name_sources).
+# ===========================================================================
+
+def test_dedup_aliases_unions_orders_and_preserves_first_seen():
+    out = _dedup_aliases([al("a", "f1"), al("b", "f1"), al(" a ", "f2"), al("a", "f1")])
+    assert [x.text for x in out] == ["a", "b"]
+    assert out[0].source_files == ["f1", "f2"]   # f1 (1st & 4th) + f2, deduped
+    assert out[1].source_files == ["f1"]
+
+
+def test_canonical_sources_from_name_from_alias_union_and_no_match():
+    a = Location(name="Riverton", name_sources=["f1"], aliases=[al("The River", "f2")])
+    b = Location(name="Riverton", name_sources=["f3"])          # same name, different file
+    assert _canonical_sources([a, b], "Riverton") == ["f1", "f3"]  # union across members' names
+    assert _canonical_sources([a], "The River") == ["f2"]          # matched an alias's sources
+    assert _canonical_sources([a], "Nonexistent") == []            # no match -> []
+
+
+def test_canonical_sources_is_case_sensitive():
+    a = Location(name="Riverton", name_sources=["f1"])
+    assert _canonical_sources([a], "RIVERTON") == []   # different case -> not this name's sources
+
+
+def test_combine_group_carries_losing_name_provenance_into_alias():
+    a = Location(name="Lake Mundi", name_sources=["f1"], aliases=[al("The Pond", "f1")])
+    b = Location(name="The Great Well", name_sources=["f2"])
+    merged = _combine_group([a, b], "Lake Mundi")
+    assert merged.name == "Lake Mundi"
+    assert merged.name_sources == ["f1"]                 # the canonical's provenance
+    by_text = {x.text: x for x in merged.aliases}
+    # the losing name "The Great Well" became an alias carrying ITS OWN source
+    assert by_text["The Great Well"].source_files == ["f2"]
+    assert by_text["The Pond"].source_files == ["f1"]
+
+
+def test_combine_group_name_sources_union_when_two_members_assert_canonical():
+    a = Location(name="Riverton", name_sources=["f1"], details=[det("x", "f1")])
+    b = Location(name="Riverton", name_sources=["f2"], details=[det("y", "f2")])
+    merged = _combine_group([a, b], "Riverton")
+    assert merged.name_sources == ["f1", "f2"]           # both files attested the name
+
+
+def test_entity_for_prompt_reduces_aliases_hides_provenance_keeps_key_order():
+    e = Location(name="Lake Mundi", name_sources=["secret.txt"],
+                 aliases=[al("The Pond", "secret.txt")],
+                 details=[det("fed by a spring", "secret.txt")])
+    data = _entity_for_prompt(e)
+    assert data["aliases"] == ["The Pond"]               # aliases reduced to bare text
+    assert data["details"] == ["fed by a spring"]
+    blob = json.dumps(data)
+    assert "source_files" not in blob and "name_sources" not in blob and "secret.txt" not in blob
+    # key order unchanged (name_sources popped, others in place) -> prompt cache still hits
+    assert list(data) == ["name", "aliases", "details", "supporting_quotes"]

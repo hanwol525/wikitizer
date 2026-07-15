@@ -41,7 +41,7 @@ from typing import Optional
 from pydantic import ValidationError
 
 from agents.base_extractor import BaseExtractor
-from models.lore import Character, Detail
+from models.lore import Alias, Character, Detail
 from models.message import Message
 
 logger = logging.getLogger(__name__)
@@ -135,7 +135,11 @@ class CharactersExtractor(BaseExtractor):
         # aliases -- mirror LocationsExtractor: string-only, and a non-list value
         # (e.g. Claude sends a bare string) becomes [] instead of crashing.
         raw_aliases = raw.get("aliases")
-        aliases = [a for a in raw_aliases if isinstance(a, str)] if isinstance(raw_aliases, list) else []
+        # Batches are file-pure (BaseExtractor.extract), so ONE file owns every
+        # name, alias, detail and quote in this batch.
+        source = batch[0].source_file
+        aliases = ([Alias(text=a, source_files=[source]) for a in raw_aliases if isinstance(a, str)]
+                   if isinstance(raw_aliases, list) else [])
 
         # is_pc -- the model defaults to False (NPC), so "if unsure, just some NPC"
         # is the safe assumption; honor it whenever Claude omits or fumbles the field.
@@ -201,6 +205,7 @@ class CharactersExtractor(BaseExtractor):
         try:
             return Character(
                 name=name,
+                name_sources=[source],
                 aliases=aliases,
                 is_pc=is_pc,
                 player_name=player_name,

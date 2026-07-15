@@ -35,7 +35,7 @@ from typing import Optional
 from pydantic import ValidationError
 
 from agents.base_extractor import BaseExtractor
-from models.lore import Detail, Location
+from models.lore import Alias, Detail, Location
 from models.message import Message
 
 logger = logging.getLogger(__name__)
@@ -98,7 +98,11 @@ class LocationsExtractor(BaseExtractor):
         # Defensive: only keep string aliases, and only if it's actually a list
         # (a stray string would otherwise splat into one-char "aliases").
         raw_aliases = raw.get("aliases")
-        aliases = [a for a in raw_aliases if isinstance(a, str)] if isinstance(raw_aliases, list) else []
+        # Batches are file-pure (BaseExtractor.extract), so ONE file owns every
+        # name, alias, detail and quote in this batch.
+        source = batch[0].source_file
+        aliases = ([Alias(text=a, source_files=[source]) for a in raw_aliases if isinstance(a, str)]
+                   if isinstance(raw_aliases, list) else [])
 
         # A non-list ``details`` (e.g. an int) would crash ``for d in ...``; the
         # never-crash rule means we coerce it to empty rather than blow up the batch.
@@ -138,6 +142,7 @@ class LocationsExtractor(BaseExtractor):
         try:
             return Location(
                 name=name,
+                name_sources=[source],
                 aliases=aliases,
                 details=details_out,
                 supporting_quotes=quotes_out,
