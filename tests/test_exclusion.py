@@ -174,6 +174,15 @@ def test_alias_dropped_when_secret_only():
     assert [a.text for a in kept.aliases] == ["public alias"]
 
 
+def test_alias_with_no_sources_is_dropped():
+    # A source-less Alias can't be proven public -> over-hide, same as a Detail.
+    e = Location(name="X", name_sources=["group.txt"], aliases=[al("unsourced")],
+                 details=[det("f", "group.txt")])
+    kept = _filter_entity(e, {"secret.txt"})
+    assert kept.aliases == []
+    assert kept.name == "X"        # public name -> no re-head
+
+
 def test_no_rehead_when_name_is_public():
     e = Location(name="Publicton", name_sources=["group.txt"], aliases=[al("aka", "group.txt")],
                  details=[det("f", "group.txt")])

@@ -145,9 +145,11 @@ class Orchestrator:
         extract (6 in parallel) -> reconcile per type + order_history -> render.
 
         When exclude_sources is given, ALSO builds a restricted doc: entities carved
-        by filter_entities (confidential-only facts/quotes stripped), and History
-        RE-RUN over the messages minus the excluded files -- leak-proof by
-        construction, since the History extractor never sees the secret messages.
+        by filter_entities (confidential-only facts, quotes, and aliases stripped,
+        and a secret-only canonical name re-headed to a surviving public alias --
+        Part 3), and History RE-RUN over the messages minus the excluded files --
+        leak-proof by construction, since the History extractor never sees the
+        secret messages.
         """
         # Fail fast on a bad exclude name BEFORE any work. A name that matches
         # nothing would silently leave those messages in the "restricted" doc.
