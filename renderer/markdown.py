@@ -12,11 +12,55 @@ top-level `render_wiki` that wires all six sections plus the footnotes block int
 one document.
 """
 
+import re
 from typing import Optional
 
 from renderer.crosslink import CrosslinkMap, add_crosslinks, build_crosslink_map
 from renderer.footnotes import FootnoteRegistry
 from models.lore import Location, Character, Organization, Item, PeopleAndCultures
+
+
+def _flatten(text: str) -> str:
+    """Collapse internal whitespace to single spaces so a value renders as ONE
+    markdown list item. A merged HistoryEvent's description is ``"\\n\\n".join(...)``
+    of the pieces (the reconciler keeps both), and a line-wrapped ``date_text`` can
+    carry a stray newline ("151 to\\n200"); dropped straight into a ``- `` bullet,
+    that blank line ENDS the list item and spills the rest as an un-bulleted
+    paragraph. Flattening first keeps the bullet intact -- the same reason the entity
+    renderer joins its details into one paragraph."""
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _is_renderable(entity) -> bool:
+    """True if an entity has anything to show: a polished prose body, at least one
+    detail, or at least one supporting quote (a footnote). A name-only entity with
+    none of these would render as a bare heading, so render_wiki drops it. A quote
+    alone still counts -- a named-but-factless entity that carries its name as a
+    supporting quote renders as a clean heading + footnote (the existing behaviour)."""
+    return bool(getattr(entity, "prose", None)) or bool(entity.details) or bool(entity.supporting_quotes)
+
+
+def _smart_join_details(details) -> str:
+    """Join an entity's `details` into one prose paragraph, giving each fact a
+    terminal period so they don't run together.
+
+    The extractors write each `Detail.text` as a short fragment WITHOUT a trailing
+    period (e.g. "A massive central lake"), so a bare space join produced run-ons
+    ("A massive central lake Home to three rings"). We add a "." to any fact that
+    doesn't already end in sentence punctuation, then space-join -- so a fact that
+    already ends in ".", "!" or "?" is left alone (no doubled period). A "." is not
+    a cross-link word-boundary char, so this is applied BEFORE add_crosslinks with no
+    effect on matching. This is the fallback body source; when the prose agent has
+    run, `entity.prose` is used instead (see _render_entity)."""
+    parts = []
+    for d in details:
+        t = d.text.strip()
+        if not t:
+            continue
+        if t[-1] not in ".!?":
+            t += "."
+        parts.append(t)
+    return " ".join(parts)
 
 
 # Both notes are heads-ups TO THE READER -- they never claim the tool reconciles
@@ -61,13 +105,19 @@ def _event_bullet(event, anchor: Optional[str], cmap: CrosslinkMap,
     #    for every undated and could-not-place event, so the clause simply vanishes.
     #    Truthiness is the RIGHT check here (unlike position): an empty date string
     #    should hide the tag exactly like None does.
-    date_tag = f" — {event.date_text}" if event.date_text else ""
+    date_tag = f" — {_flatten(event.date_text)}" if event.date_text else ""
 
     # 3. The description is the ONLY prose we cross-link -- we link it alone and
     #    build the bullet around it, never feeding the bold name or the date to the
     #    linker. `this_anchor` is this event's own anchor (or None), so a mention of
     #    the event's own name inside its description won't link back to itself.
-    linked_desc = add_crosslinks(event.description, cmap, anchor)
+    #    Source: the prose agent's polished description if it ran (`event.prose`), else
+    #    the raw `event.description`. Flatten first: a merged event's raw description is
+    #    "\n\n"-joined, and that blank line would otherwise break the bullet (spill a
+    #    second, un-bulleted paragraph); a polished body is one line but flattening is
+    #    harmless there.
+    raw_desc = event.prose if event.prose else event.description
+    linked_desc = add_crosslinks(_flatten(raw_desc), cmap, anchor)
 
     # 4. Footnote markers for the event's supporting quotes, in order, appended at
     #    the END of the description -- a history event is one description block, so
@@ -179,12 +229,13 @@ def _render_entity(entity, anchor: str, cmap: CrosslinkMap,
     # raw HTML through; already logged against the renderer-choice decision.)
     heading = f'### <a id="{anchor}"></a>{entity.name}'
 
-    # details -> one prose paragraph, joined with spaces. We do NOT massage the
-    # facts to flow into each other; they just need to be present. The WHOLE
-    # paragraph is ONE cross-link block, with the entity's own anchor as
-    # `this_anchor`, so a mention of the entity's own name inside its body doesn't
-    # link back to itself.
-    body = add_crosslinks(" ".join(d.text for d in entity.details), cmap, anchor)
+    # Body source: the prose agent's polished paragraph if it ran (`entity.prose`),
+    # else the details joined into one paragraph with per-fact terminal periods
+    # (`_smart_join_details`). Either way the WHOLE paragraph is ONE cross-link
+    # block, with the entity's own anchor as `this_anchor`, so a mention of the
+    # entity's own name inside its body doesn't link back to itself.
+    raw_body = entity.prose if entity.prose else _smart_join_details(entity.details)
+    body = add_crosslinks(raw_body, cmap, anchor)
 
     # Footnote markers for the entity's quote pool, appended at the end of the body.
     refs = "".join(f"[^{registry.add(q)}]" for q in entity.supporting_quotes)
@@ -260,6 +311,21 @@ def render_wiki(locations, characters, events, organizations, items, people,
     function is the seam the eventual whole-pipeline entry point (main.py) plugs
     into -- it takes the six typed lists explicitly.
     """
+    # Drop truly-empty entities BEFORE building the cross-link map. An entity with no
+    # renderable body (no prose, no details) AND no supporting quotes has nothing to
+    # show -- it would render as a bare heading (or a lone footnote-less stub). This is
+    # where a business wrongly grabbed as a name-only Location, or a name-only entity
+    # whose only "fact" failed the verbatim-quote check, gets pruned. Filtering HERE
+    # (not inside _render_entity) is load-bearing: a dropped entity must be neither an
+    # anchor target NOR a cross-link source, so a mention of its name elsewhere renders
+    # as plain text instead of a link to a page that doesn't exist. Events are never
+    # filtered -- a HistoryEvent always has a (required) description.
+    locations = [e for e in locations if _is_renderable(e)]
+    characters = [e for e in characters if _is_renderable(e)]
+    organizations = [e for e in organizations if _is_renderable(e)]
+    items = [e for e in items if _is_renderable(e)]
+    people = [e for e in people if _is_renderable(e)]
+
     # Concatenate the five entity types into ONE list for the map (build_crosslink_map
     # takes a single entity list). The order here only decides which entity keeps
     # the clean slug on a cross-type name clash -- cosmetic, since both still get an

@@ -56,7 +56,7 @@ Label every message with exactly one of these four labels:
 
 - lore — in-world worldbuilding worth putting in a wiki: places, characters, factions, history, geography, and in-world facts or events. Examples: the name of a location, who rules a region, what happened in the world's past.
 - mechanic — real game/table talk that is NOT worldbuilding: dice, rules, character-sheet numbers (AC, stats, feats, subclasses), spell legality, build planning, scheduling sessions, links to rules pages.
-- noise — anything with no worldbuilding or game content: reactions, "lol"/"ok"/"nice", off-topic chatter, logistics, single-word filler.
+- noise — anything with no worldbuilding or game content: reactions, "lol"/"ok"/"nice", off-topic chatter, logistics, single-word filler. This ALSO covers out-of-world, real-world, or meta / out-of-character content that is not part of THIS fictional setting — a real-world brand or product, a character explicitly framed as "a regular person from Earth" or imported from another game/show, isekai / "hit by a truck" jokes, a reference to "my character in my OTHER campaign", and similar out-of-character riffs. Even when it is phrased like lore (a proper name, a backstory), content explicitly framed as NOT part of this fictional world is noise, not lore.
 - ambiguous — you genuinely cannot tell whether it carries worldbuilding. Use this ONLY for real uncertainty, not to avoid deciding. If a message MIGHT carry worldbuilding but you're unsure, prefer ambiguous over noise so it isn't lost.
 
 The tricky boundary is lore vs mechanic. Judge by whether the message tells you something about the WORLD or something about the GAME at the table. A message can name game terms and still be lore if it states a fact about the world — "the royal family is human" is lore even though "human" is a game race. Conversely "what's your AC" or "is that spell banned" is mechanic even if it mentions in-world things.
@@ -145,12 +145,25 @@ class NoiseFilterAgent(BaseAgent):
             )
             return [(msg, "ambiguous") for msg in batch]
 
+        # json_repair can recover a response into a WRAPPED shape like ['', [{...},
+        # {...}]] (a stray scalar plus the real rows nested one level deep). Splice a
+        # single level of nested lists back out so those rows aren't skipped as "not
+        # an object" -- otherwise the whole batch falls through to the ambiguous
+        # fallback and floods the extractors. Genuine junk (a bare string/int) isn't a
+        # list, so it still hits the skip-and-log below. (Same fix as the extractors.)
+        flattened = []
+        for item in response:
+            if isinstance(item, list):
+                flattened.extend(item)
+            else:
+                flattened.append(item)
+
         # Fold the response into {local_id: label}, validating as we go. valid_ids
         # is the set of ids we actually sent this batch; anything else is noise
         # from Claude and gets dropped (the message still gets a label below).
         labels_by_id: dict[int, str] = {}
         valid_ids = range(len(batch))
-        for item in response:
+        for item in flattened:
             if not isinstance(item, dict):
                 logger.warning(
                     "Noise filter response entry is not an object, ignoring: %r", item

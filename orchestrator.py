@@ -11,7 +11,7 @@ reconciler's timeline weave already follows -- an incomplete wiki beats a fake o
 
 import logging
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional
 
 import anthropic
@@ -27,8 +27,15 @@ from agents.organization_extractor import OrganizationExtractor
 from agents.item_extractor import ItemExtractor
 from agents.people_and_cultures_extractor import PeopleAndCulturesExtractor
 from agents.reconciler import Reconciler
+from agents.prose_agent import (
+    ProseAgent, build_deconflation_map, deconflate_entities, deconflate_events)
 from renderer.markdown import render_wiki
 from exclusion import validate_exclusions, filter_entities
+
+# The five noun entity types (History is handled separately: extracted in the parallel
+# fan-out, ordered by the timeline pass). Fixed order so the concatenated inbound-mention
+# index slicing lines up per type.
+NOUN_TYPES = ("locations", "characters", "organizations", "items", "people")
 
 logger = logging.getLogger(__name__)
 
@@ -39,7 +46,7 @@ logger = logging.getLogger(__name__)
 REVIEW_PREFIX = "[REVIEW]"
 
 
-def _history_pipeline(messages, history_extractor, reconciler):
+def _history_pipeline(messages, history_extractor, reconciler, current_year=None):
     """Run History's three steps (extract -> reconcile -> order_history) over
     `messages`, degrading exactly like the main run: a failed step logs a loud
     [REVIEW] line and falls back to a safe partial result instead of crashing.
@@ -50,6 +57,9 @@ def _history_pipeline(messages, history_extractor, reconciler):
     call this -- there, History extraction is entangled with the 6-way parallel
     fan-out and its reconcile with the per-type loop -- so we leave the main path
     exactly as it is and only reuse this for the one extra pass.
+
+    `current_year` is the campaign reference year threaded into order_history so the
+    restricted timeline resolves present-relative dates the same way the full one does.
     """
     try:
         raw = history_extractor.extract(messages)
@@ -62,11 +72,51 @@ def _history_pipeline(messages, history_extractor, reconciler):
         logger.error("%s restricted history reconcile failed; using un-reconciled. %s", REVIEW_PREFIX, exc)
         deduped = raw
     try:
-        return reconciler.order_history(deduped)
+        return reconciler.order_history(deduped, current_year=current_year)
     except Exception as exc:
         logger.error("%s restricted history order_history failed; events -> 'Could Not "
                      "Place'. %s", REVIEW_PREFIX, exc)
         return deduped   # unordered -> renders under Could Not Place
+
+
+def _apply_prose(prose_agent, noun_dict, events):
+    """Two stages, both returning NEW objects: (1) DETERMINISTIC de-conflation replaces
+    player-name tokens with the character name in every detail/description/title; (2) the
+    LLM copyeditor cleans the (de-conflated) bodies into readable prose. Returns
+    (new_noun_dict, new_events).
+
+    The stages are separate so de-conflation SURVIVES a polish failure: if stage 2 (the
+    LLM) dies, we still return the de-conflated set, and the renderer's raw-details
+    fallback is already player-name-free. Each stage DEGRADES independently -- a failure
+    logs a loud [REVIEW] line and returns the pre-stage objects -- the pipeline's
+    "less-complete, never corrupt" rule.
+
+    Called on POST-carve entities in the restricted doc, so it only ever sees facts that
+    survived the exclusion, and the de-conflation map is built from the carved (public)
+    characters -- leak-safe by construction, like the History re-run. `noun_dict` is
+    keyed by NOUN_TYPES; `events` is the ordered HistoryEvent list.
+    """
+    # --- Stage 1: deterministic de-conflation (pure; never an LLM call). ---
+    try:
+        deconf = build_deconflation_map(noun_dict["characters"])
+        base = dict(noun_dict)   # preserve any non-noun keys (e.g. "history")
+        for t in NOUN_TYPES:
+            base[t] = deconflate_entities(noun_dict[t], deconf)
+        base_events = deconflate_events(events, deconf)
+    except Exception as exc:
+        logger.error("%s de-conflation failed; using raw objects. %s", REVIEW_PREFIX, exc)
+        base, base_events = dict(noun_dict), events
+
+    # --- Stage 2: LLM copyedit on the de-conflated objects; degrade to that set. ---
+    try:
+        polished = dict(base)
+        for t in NOUN_TYPES:
+            polished[t] = prose_agent.polish_entities(base[t])
+        return polished, prose_agent.polish_events(base_events)
+    except Exception as exc:
+        logger.error("%s prose copyedit failed; rendering de-conflated (un-polished) "
+                     "bodies. %s", REVIEW_PREFIX, exc)
+        return base, base_events
 
 
 @dataclass
@@ -82,6 +132,18 @@ class PipelineConfig:
     speaker_map: dict[str, str]
     crosslink_words: dict
     max_workers: int = 6
+    # The campaign's "present-day" reference year (e.g. 1424), used by the timeline
+    # pass to resolve present-relative dates ("200 years ago" -> 1224). None (the
+    # default) means: let order_history auto-detect it from the lore, or leave
+    # relative-offset events undated if none is found. A set value OVERRIDES the
+    # auto-detected one. Optional[int] (not int | None) for the 3.9 pin.
+    current_year: Optional[int] = None
+    # The declared party: {player: [character name, alias, ...]} (loaded by main.py
+    # from config/player_map.json, gitignored). Empty {} (default) means no party
+    # declared -> the characters extractor falls back to the LLM's roster-validated
+    # guess. When set, it authoritatively assigns player_name and merges the names
+    # grouped under one player as a single character.
+    player_map: dict = field(default_factory=dict)
 
 
 @dataclass
@@ -94,6 +156,10 @@ class WikiOutput:
     """
     full: str
     restricted: Optional[str] = None
+    # The reconciled player characters (is_pc) with their assigned players, surfaced
+    # so `--confirm-players` can show the user what was discovered and build the
+    # config from the real (post-merge) names/aliases. Empty for a normal run.
+    characters: list = field(default_factory=list)
 
 
 class Orchestrator:
@@ -104,12 +170,17 @@ class Orchestrator:
     client (with the SDK's own 3x transient-HTTP retry) that every agent shares.
     """
 
-    def __init__(self, client=None):
+    def __init__(self, client=None, cache=False):
         # Injected client wins (tests pass a fake); else build ONE real shared
         # client. max_retries=3 is the SDK's transient-HTTP retry, set once for the
         # whole run. The API key is read by the SDK from the environment (main.py's
         # load_dotenv put it there) -- we never read or store the key here.
         self.client = client if client is not None else anthropic.Anthropic(max_retries=3)
+        # Turn on the agents' dev disk cache (main.py's --cache flag). It lives in
+        # call_claude_json, so it skips identical extractor + noise-filter calls on a
+        # re-run of the same logs -- the big saver while debugging. The reconciler /
+        # timeline use call_claude (deliberately cache-free), so those re-run.
+        self.cache = cache
 
     def _build_agents(self, config: PipelineConfig):
         """Construct every agent, all sharing self.client. Its own method so a test
@@ -120,23 +191,31 @@ class Orchestrator:
         noise filter self-selects Haiku; the extractors/reconciler keep BaseAgent's
         Sonnet default) -- so here we only pass the shared client.
         """
-        noise_filter = NoiseFilterAgent(client=self.client)
+        # `cache=self.cache` flows to BaseAgent via **kwargs and turns on the disk
+        # cache when --cache is set (default off -> unchanged behaviour).
+        noise_filter = NoiseFilterAgent(client=self.client, cache=self.cache)
         # The characters extractor needs the real player names so table-talk about a
         # real person ("Sam, you free Thursday?") isn't minted as a character. The
         # roster is the speaker map's VALUES (every real person, incl. the exporter).
         extractors = {
-            "locations": LocationsExtractor(client=self.client),
+            "locations": LocationsExtractor(client=self.client, cache=self.cache),
             "characters": CharactersExtractor(
                 client=self.client,
                 player_names=list(config.speaker_map.values()),
+                player_map=config.player_map,
+                cache=self.cache,
             ),
-            "history": HistoryExtractor(client=self.client),
-            "organizations": OrganizationExtractor(client=self.client),
-            "items": ItemExtractor(client=self.client),
-            "people": PeopleAndCulturesExtractor(client=self.client),
+            "history": HistoryExtractor(client=self.client, cache=self.cache),
+            "organizations": OrganizationExtractor(client=self.client, cache=self.cache),
+            "items": ItemExtractor(client=self.client, cache=self.cache),
+            "people": PeopleAndCulturesExtractor(client=self.client, cache=self.cache),
         }
-        reconciler = Reconciler(client=self.client)
-        return noise_filter, extractors, reconciler
+        # The reconciler needs the declared party too, for the deterministic
+        # declared-merge floor (names grouped under one player -> one character).
+        reconciler = Reconciler(client=self.client, cache=self.cache, player_map=config.player_map)
+        # The prose agent runs AFTER reconcile/carve to polish bodies + descriptions.
+        prose_agent = ProseAgent(client=self.client, cache=self.cache)
+        return noise_filter, extractors, reconciler, prose_agent
 
     def run(self, files, config: PipelineConfig, exclude_sources=None) -> "WikiOutput":
         """Walk the full pipeline and return a WikiOutput (full + optional restricted).
@@ -170,7 +249,7 @@ class Orchestrator:
             logger.warning("No messages parsed from %d file(s); wiki will be empty.", len(files))
             # render_wiki returns "" for an empty world, so we let it fall through.
 
-        noise_filter, extractors, reconciler = self._build_agents(config)
+        noise_filter, extractors, reconciler, prose_agent = self._build_agents(config)
 
         # --- 2. Noise filter -> select. This is the ONE hard-stop. ---
         # The noise filter is the funnel the whole rest of the pipeline eats. Content
@@ -227,7 +306,7 @@ class Orchestrator:
 
         events = reconciled["history"]
         try:
-            events = reconciler.order_history(events)
+            events = reconciler.order_history(events, current_year=config.current_year)
         except Exception as exc:
             logger.error(
                 "%s order_history failed; history will render under "
@@ -235,9 +314,12 @@ class Orchestrator:
             )
             # leave `events` as the reconciled-but-unordered list (timeline fields None)
 
-        # --- 5. Render the FULL doc. (Identical to what run() returned before --
-        #        same inputs, same call -- so the full wiki is byte-for-byte
-        #        unchanged; we just hold it in a variable now.) ---
+        # --- 5. Prose polish (full doc): rewrite terse/redundant bodies into clean,
+        #        de-duplicated, de-conflated prose. Runs AFTER reconcile+order_history.
+        #        Degrades to un-polished on failure (renderer falls back to the join). ---
+        reconciled, events = _apply_prose(prose_agent, reconciled, events)
+
+        # --- 6. Render the FULL doc. ---
         full = render_wiki(
             locations=reconciled["locations"],
             characters=reconciled["characters"],
@@ -248,22 +330,31 @@ class Orchestrator:
             common_words=config.crosslink_words,
         )
 
-        # --- 6. If exclusions were requested, build the RESTRICTED doc too. ---
+        # --- 7. If exclusions were requested, build the RESTRICTED doc too. ---
         # Entities are CARVED from the finished lore (no re-extraction). History is
         # RE-RUN over the messages minus the excluded files -- so a secret can't be
-        # woven into a description, because the extractor never sees it.
+        # woven into a description, because the extractor never sees it. The prose pass
+        # runs on the CARVED entities (post-exclusion), so it can only ever polish facts
+        # that survived -- leak-safe by construction, like the History re-run.
         restricted = None
         if exclude_sources:
             excluded = set(exclude_sources)   # bare filenames; validated above
             restricted_messages = [m for m in filtered if m.source_file not in excluded]
+            carved = {t: filter_entities(reconciled[t], excluded) for t in NOUN_TYPES}
+            r_events = _history_pipeline(restricted_messages, extractors["history"],
+                                         reconciler, current_year=config.current_year)
+            carved, r_events = _apply_prose(prose_agent, carved, r_events)
             restricted = render_wiki(
-                locations=filter_entities(reconciled["locations"], excluded),
-                characters=filter_entities(reconciled["characters"], excluded),
-                events=_history_pipeline(restricted_messages, extractors["history"], reconciler),
-                organizations=filter_entities(reconciled["organizations"], excluded),
-                items=filter_entities(reconciled["items"], excluded),
-                people=filter_entities(reconciled["people"], excluded),
+                locations=carved["locations"],
+                characters=carved["characters"],
+                events=r_events,
+                organizations=carved["organizations"],
+                items=carved["items"],
+                people=carved["people"],
                 common_words=config.crosslink_words,
             )
 
-        return WikiOutput(full=full, restricted=restricted)
+        # Surface the discovered player characters (post-merge names/aliases + assigned
+        # players) so `--confirm-players` can build the config from the real names.
+        player_characters = [c for c in reconciled["characters"] if getattr(c, "is_pc", False)]
+        return WikiOutput(full=full, restricted=restricted, characters=player_characters)

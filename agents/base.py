@@ -33,6 +33,7 @@ from pathlib import Path
 from typing import Optional, Union
 
 import anthropic
+from json_repair import repair_json
 
 logger = logging.getLogger(__name__)
 
@@ -63,6 +64,45 @@ def strip_code_fences(text: str) -> str:
 
     inner = "\n".join(lines[1:-1])
     return inner.strip()
+
+
+def loads_tolerant(text: str) -> Union[dict, list]:
+    """Parse JSON out of an LLM reply, tolerating the two malformations Claude
+    produces that plain ``json.loads`` chokes on:
+
+      * a conversational preamble before the JSON ("Looking at these messages...")
+        -- the characters extractor especially likes to reason out loud; and
+      * **unescaped double-quotes inside a string value** -- when Claude copies a
+        verbatim quote it straightens the source's curly quotes to ``"`` and forgets
+        to escape them, so ``"quote": "The other "countries" are..."`` is invalid JSON.
+
+    Either one used to fail all three retries and drop the ENTIRE 20-message batch
+    (``_extract_batch`` returns ``[]``), which is where most of the missing lore went.
+
+    Strategy: try strict ``json.loads(strip_code_fences(...))`` first -- the happy
+    path is unchanged and stays exact -- and only on failure fall back to
+    ``json_repair`` (which both peels a preamble and re-escapes stray quotes).
+    Raises ``json.JSONDecodeError`` if even the repair can't produce a dict/list, so
+    every caller's existing ``except JSONDecodeError`` retry/contain logic is
+    untouched.
+
+    SAFETY: repair is deliberately aggressive, but it can only ever *recover* a
+    batch, never fabricate lore, because everything downstream re-validates -- the
+    extractor's ``isinstance(list)`` guard, ``_build_entry``'s per-field checks, and
+    above all the verbatim-quote check, which drops any quote that isn't a real
+    substring of its cited message. A mis-repaired quote is simply dropped, exactly
+    as today.
+    """
+    stripped = strip_code_fences(text)
+    try:
+        parsed = json.loads(stripped)
+    except json.JSONDecodeError:
+        # return_objects=True hands back the parsed Python value directly; a reply
+        # with no recoverable JSON comes back as "" (or similar), caught below.
+        parsed = repair_json(stripped, return_objects=True)
+    if not isinstance(parsed, (dict, list)):
+        raise json.JSONDecodeError("JSON must be an object or array", stripped or text, 0)
+    return parsed
 
 
 class ClaudeJSONError(ValueError):
@@ -127,12 +167,29 @@ class BaseAgent:
         Deliberately cache-free: the dev cache lives in :meth:`call_claude_json`
         and is written only after a response parses, so it can't poison the
         retry loop (see that method for the reasoning).
+
+        **Anthropic prompt caching:** the system prompt is passed as a single
+        content block marked ``cache_control: {"type": "ephemeral"}``. Every agent's
+        system prompt is byte-stable across a run (module constants / class attrs;
+        the characters roster is injected once, ``sorted()`` for stability), and
+        these calls carry no tools and a per-call *user* message, so the system
+        prompt is exactly the cacheable prefix. The many batch calls in a run then
+        bill it once (+write) and read it back at ~0.1x. NB: a prefix under the
+        model's minimum (Sonnet 4.6 = 2048 tokens, Haiku 4.5 = 4096) silently won't
+        cache -- no error, it just no-ops -- so the short prompts are free to mark
+        and the long ones (reconciler, characters, timeline) are where it pays off.
+        Default (5-min) TTL is right here: a run's batches all fire within minutes.
+
+        The signature stays ``system_prompt: str`` on purpose -- wrapping happens
+        only at the ``create`` call, so the dev cache key (which hashes the string)
+        is untouched.
         """
         response = self.client.messages.create(
             model=self.model,
             max_tokens=self.max_tokens,
             temperature=self.temperature,
-            system=system_prompt,
+            system=[{"type": "text", "text": system_prompt,
+                     "cache_control": {"type": "ephemeral"}}],
             messages=[{"role": "user", "content": user_message}],
         )
         # A response can carry several content blocks (text, thinking, ...);
@@ -161,18 +218,14 @@ class BaseAgent:
                 # Only parsed-good text is ever stored, but the on-disk cache file
                 # can still be corrupted/truncated; treat that as a cache miss.
                 try:
-                    return json.loads(strip_code_fences(cached))
+                    return loads_tolerant(cached)
                 except json.JSONDecodeError:
                     logger.warning("Ignoring corrupted LLM cache entry; re-calling Claude")
         last_raw: Optional[str] = None
         for attempt in range(1, self.max_json_retries + 1):
             last_raw = self.call_claude(system_prompt, user_message)
             try:
-                parsed = json.loads(strip_code_fences(last_raw))
-                if not isinstance(parsed, (dict, list)):
-                    raise json.JSONDecodeError(
-                        "JSON must be an object or array", strip_code_fences(last_raw), 0
-                    )
+                parsed = loads_tolerant(last_raw)
             except json.JSONDecodeError as exc:
                 logger.warning(
                     "Claude returned invalid JSON (attempt %d/%d): %s",

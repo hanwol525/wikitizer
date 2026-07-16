@@ -105,6 +105,9 @@ def stub_pipeline(monkeypatch):
         monkeypatch.setattr(main_mod, "load_speaker_map", lambda p: {"exporter": "H"})
         monkeypatch.setattr(main_mod, "load_crosslink_words",
                             lambda p: {"require_article": [], "never_link": []})
+        # load_player_map is tolerant (missing -> {}), but stub it so the tests stay
+        # hermetic even if a real config/player_map.json exists on the dev's machine.
+        monkeypatch.setattr(main_mod, "load_player_map", lambda p: {})
         return calls
 
     return _install
@@ -159,3 +162,35 @@ def test_main_falls_back_to_the_default_output_path(tmp_path, stub_pipeline, mon
     monkeypatch.chdir(tmp_path)
     main_mod.main(["--files", "logs/a.txt"])
     assert (tmp_path / "output" / "wiki.md").read_text(encoding="utf-8") == "FULL"
+
+
+# --- --confirm-players ------------------------------------------------------
+
+def test_parse_args_confirm_players_flag():
+    assert parse_args(["--files", "a.txt"]).confirm_players is False
+    assert parse_args(["--files", "a.txt", "--confirm-players"]).confirm_players is True
+
+
+def test_main_confirm_players_builds_and_saves_config(tmp_path, stub_pipeline, monkeypatch):
+    # Wiring test: with the flag set, main() runs the confirm helper on the discovered
+    # PCs and saves the result. The confirm logic itself lives in test_confirm_players.py,
+    # so here we stub it and assert main() calls save_player_map with its output.
+    stub_pipeline(WikiOutput(full="FULL", characters=["<pc objects>"]))
+    saved = {}
+    monkeypatch.setattr(main_mod, "confirm_player_map",
+                        lambda pcs, existing: {"Sam": ["Kriggy"]})
+    monkeypatch.setattr(main_mod, "save_player_map",
+                        lambda mapping, path: saved.update(mapping=mapping, path=path))
+    main_mod.main(["--files", "logs/a.txt", "--output", str(tmp_path / "wiki.md"),
+                   "--confirm-players"])
+    assert saved["mapping"] == {"Sam": ["Kriggy"]}
+    assert saved["path"] == main_mod.PLAYER_MAP_PATH
+
+
+def test_main_does_not_confirm_without_the_flag(tmp_path, stub_pipeline, monkeypatch):
+    stub_pipeline(WikiOutput(full="FULL"))
+    called = {"save": False}
+    monkeypatch.setattr(main_mod, "save_player_map",
+                        lambda *a, **k: called.__setitem__("save", True))
+    main_mod.main(["--files", "logs/a.txt", "--output", str(tmp_path / "wiki.md")])
+    assert called["save"] is False   # no --confirm-players -> config left untouched

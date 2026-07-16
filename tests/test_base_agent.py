@@ -141,7 +141,12 @@ def test_call_claude_sends_expected_request_params():
     assert sent["model"] == "claude-sonnet-4-6"
     assert sent["temperature"] == 0.2
     assert sent["max_tokens"] == 4096
-    assert sent["system"] == "you are a lore extractor"
+    # system is now a content-block list carrying an ephemeral cache_control marker
+    # (prompt caching); the prompt text is unchanged.
+    assert sent["system"] == [
+        {"type": "text", "text": "you are a lore extractor",
+         "cache_control": {"type": "ephemeral"}}
+    ]
     assert sent["messages"] == [
         {"role": "user", "content": "extract from: Lake Mundi is huge"}
     ]

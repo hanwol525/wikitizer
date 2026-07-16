@@ -45,6 +45,8 @@ SYSTEM_PROMPT = """You are a worldbuilding extractor for an exported D&D group c
 
 A "named location" is any place with a proper name: a lake, mountain range, city, country, region, landmark, building, etc. Examples: "Lake Mundi", "the Cloud Mountains", "Gol", "Eglon". Do NOT extract generic, unnamed places like "the forest", "a tavern", or "the dungeon" unless they are given a proper name. A realm or nation is both a place and a political power. Capture it here as a PLACE — its geography, territory, and where it sits — and leave its government and how it is ruled to the organizations extractor; you do not need to describe its politics.
 
+A business, company, shop, guild, or brewery is NOT a location even when its name contains a place-word (e.g. "Wizard's Tower Brewing Company") — it is an organization, captured by the organizations extractor. Extract a place here only when it is a geographic place, landmark, or building in its own right, not a business named after or housed in one.
+
 For each named location, extract:
 - name: the location's primary/canonical name.
 - aliases: a list of any OTHER names the same location is called (empty list if none). For example, if a lake is called both "The Great Well" and "The Pond", those are aliases of it.
@@ -52,7 +54,7 @@ For each named location, extract:
 
 For each detail, provide three things:
 - detail: a short factual statement about the location, in your own words (e.g. "A massive central lake divided into three rings").
-- quote: the EXACT, VERBATIM text from the message that supports this detail. Copy it character-for-character. Do NOT paraphrase, shorten, fix typos, or change punctuation. The quote must appear word-for-word in the message.
+- quote: the EXACT, VERBATIM text from the message that supports this detail. Copy it character-for-character. Do NOT paraphrase, shorten, fix typos, or change punctuation. The quote must appear word-for-word in the message. If the copied text contains quotation marks, keep them EXACTLY as they appear — leave curly “ ” marks curly, do not straighten them — because an unescaped straight quote inside a JSON value breaks the whole batch.
 - source_id: the integer id of the message you took the quote from.
 
 Hard rules:

@@ -78,6 +78,12 @@ class Location(BaseModel):
     aliases: list[Alias] = Field(default_factory=list)
     details: list[Detail] = Field(default_factory=list)
     supporting_quotes: list[Quote] = Field(default_factory=list)
+    # The prose agent's polished, de-duplicated, de-conflated body for this entity
+    # (Phase C). None until that post-reconcile pass runs -- the renderer falls back
+    # to joining `details` when it's None, so this is fully backward-compatible and
+    # the extractors/reconciler never set it. Stripped from the reconciler merge
+    # prompt by `_entity_for_prompt` so the prompt shape stays byte-identical.
+    prose: Optional[str] = None
 
 class Character(BaseModel):
     name: str
@@ -93,6 +99,12 @@ class Character(BaseModel):
     player_name: Optional[str] = None
     details: list[Detail] = Field(default_factory=list)
     supporting_quotes: list[Quote] = Field(default_factory=list)
+    # The prose agent's polished, de-duplicated, de-conflated body for this entity
+    # (Phase C). None until that post-reconcile pass runs -- the renderer falls back
+    # to joining `details` when it's None, so this is fully backward-compatible and
+    # the extractors/reconciler never set it. Stripped from the reconciler merge
+    # prompt by `_entity_for_prompt` so the prompt shape stays byte-identical.
+    prose: Optional[str] = None
 
 class HistoryEvent(BaseModel):
     name: str
@@ -126,6 +138,12 @@ class HistoryEvent(BaseModel):
     # extraction always leaves it None.
     chronological_position: Optional[int] = None
     supporting_quotes: list[Quote] = Field(default_factory=list)
+    # The prose agent's polished, de-duplicated, de-conflated body for this entity
+    # (Phase C). None until that post-reconcile pass runs -- the renderer falls back
+    # to joining `details` when it's None, so this is fully backward-compatible and
+    # the extractors/reconciler never set it. Stripped from the reconciler merge
+    # prompt by `_entity_for_prompt` so the prompt shape stays byte-identical.
+    prose: Optional[str] = None
 
 # The three typed categories below replace the retired `OtherDetail` catch-all.
 # Each is shaped EXACTLY like Location (same four fields) on purpose: the Phase
@@ -145,6 +163,12 @@ class Organization(BaseModel):
     aliases: list[Alias] = Field(default_factory=list)
     details: list[Detail] = Field(default_factory=list)
     supporting_quotes: list[Quote] = Field(default_factory=list)
+    # The prose agent's polished, de-duplicated, de-conflated body for this entity
+    # (Phase C). None until that post-reconcile pass runs -- the renderer falls back
+    # to joining `details` when it's None, so this is fully backward-compatible and
+    # the extractors/reconciler never set it. Stripped from the reconciler merge
+    # prompt by `_entity_for_prompt` so the prompt shape stays byte-identical.
+    prose: Optional[str] = None
 
 class Item(BaseModel):
     name: str
@@ -158,6 +182,12 @@ class Item(BaseModel):
     aliases: list[Alias] = Field(default_factory=list)
     details: list[Detail] = Field(default_factory=list)
     supporting_quotes: list[Quote] = Field(default_factory=list)
+    # The prose agent's polished, de-duplicated, de-conflated body for this entity
+    # (Phase C). None until that post-reconcile pass runs -- the renderer falls back
+    # to joining `details` when it's None, so this is fully backward-compatible and
+    # the extractors/reconciler never set it. Stripped from the reconciler merge
+    # prompt by `_entity_for_prompt` so the prompt shape stays byte-identical.
+    prose: Optional[str] = None
 
 # PascalCase identifier; the pretty "People & Cultures" display label lives in
 # the renderer (a Python name can't hold a space or the bare word `and`).
@@ -173,3 +203,9 @@ class PeopleAndCultures(BaseModel):
     aliases: list[Alias] = Field(default_factory=list)
     details: list[Detail] = Field(default_factory=list)
     supporting_quotes: list[Quote] = Field(default_factory=list)
+    # The prose agent's polished, de-duplicated, de-conflated body for this entity
+    # (Phase C). None until that post-reconcile pass runs -- the renderer falls back
+    # to joining `details` when it's None, so this is fully backward-compatible and
+    # the extractors/reconciler never set it. Stripped from the reconciler merge
+    # prompt by `_entity_for_prompt` so the prompt shape stays byte-identical.
+    prose: Optional[str] = None

@@ -11,6 +11,7 @@ httpx==0.28.1
 idna==3.17
 iniconfig==2.1.0
 jiter==0.15.0
+json_repair==0.44.1
 packaging==26.2
 pluggy==1.6.0
 pydantic==2.13.4

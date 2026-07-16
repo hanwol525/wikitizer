@@ -58,7 +58,7 @@ For each item, extract:
 
 For each detail, provide three things:
 - detail: a short factual statement about the item, in your own words (e.g. "The only thing that can seal the rift").
-- quote: the EXACT, VERBATIM text from the message that supports this detail. Copy it character-for-character. Do NOT paraphrase, shorten, fix typos, or change punctuation. It must appear word-for-word in the message.
+- quote: the EXACT, VERBATIM text from the message that supports this detail. Copy it character-for-character. Do NOT paraphrase, shorten, fix typos, or change punctuation. It must appear word-for-word in the message. If the copied text contains quotation marks, keep them EXACTLY as they appear — leave curly “ ” marks curly, do not straighten them — because an unescaped straight quote inside a JSON value breaks the whole batch.
 - source_id: the integer id of the message you took the quote from.
 
 Hard rules:

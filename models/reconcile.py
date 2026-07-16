@@ -10,6 +10,8 @@ One model set covers all six entity types, because a decision is just indices +
 names; it never names a field that's specific to Characters or History.
 """
 
+from typing import Optional
+
 from pydantic import BaseModel, Field
 
 
@@ -73,12 +75,21 @@ class ReconcileDecision(BaseModel):
 # emits a position integer in either -- Python owns every chronological_position.
 
 class DatedEvent(BaseModel):
-    """One event the LLM judged to carry an explicit stated date (Call 1)."""
+    """One event the LLM judged to carry a usable date (Call 1) -- either an explicit
+    stated date, or a present-relative offset ("200 years ago") resolved against a
+    reference year."""
     index: int          # which history event this is, by position in the list we sent
     system: str         # the calendar system the date is in: "AR years", "Elder Scrolls eras", ...
     parts: list[int]    # the date as a sortable tuple, biggest unit FIRST:
                         #   [1347] for "1347", or [4, 200] for "4th Era 200".
                         # Python tuple-sorts these, so era-then-year orders for free.
+    anchor_relative: bool = False
+                        # True when `parts` was COMPUTED from a present-relative offset
+                        # against the reference year (e.g. date_text "200 years ago",
+                        # reference 1424 -> parts [1224]). It tells _sanity_guard_parts
+                        # to SKIP its digit-match check, because a resolved offset
+                        # legitimately shares no digit with its source phrase (1224 vs
+                        # 200). Defaults False, so an explicit stated date is unaffected.
 
 
 class DateDecision(BaseModel):
@@ -86,6 +97,12 @@ class DateDecision(BaseModel):
     date -> it's a candidate for relative placement in Call 2 (or Could Not Place).
     Implicit, like 4.1a's unlisted-means-singleton."""
     dated: list[DatedEvent] = Field(default_factory=list)
+    # The reference ("present-day") year the LLM used to resolve any relative offsets,
+    # and the calendar system it belongs to -- reported back for logging/traceability
+    # only (Python does not re-derive positions from them). None when no reference year
+    # was available or needed.
+    reference_year: Optional[int] = None
+    reference_system: Optional[str] = None
 
 
 class GapPlacement(BaseModel):
