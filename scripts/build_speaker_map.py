@@ -59,8 +59,8 @@ def prompt_for_names(samples: dict[str, list[str]]) -> dict[str, str]:
 
 def main():
     files = [
-        "logs/royalty.txt",
-        "logs/dndgroup.txt",
+        "logs/Royalty_June4.txt",
+        "logs/Gol_June4.txt",
         "logs/dm convo.txt",
     ]
     samples = discover_phone_numbers(files)
