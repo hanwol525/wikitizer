@@ -262,6 +262,14 @@ class ProseAgent(BaseAgent):
             logger.error("Prose batch failed to return valid JSON; leaving %d item(s) "
                          "un-polished. %s", n_items, exc)
             return {}
+        except Exception as exc:
+            # ANY other call/parse failure (a raw json.JSONDecodeError -- a sibling of
+            # ClaudeJSONError -- a RecursionError from json_repair, or a provider/adapter
+            # error) still just leaves this batch un-polished, honoring "never raises":
+            # a prose failure must never crash the render, only fall back to raw bodies.
+            logger.error("Prose batch failed unexpectedly (%s); leaving %d item(s) "
+                         "un-polished. %s", type(exc).__name__, n_items, exc)
+            return {}
 
         if not isinstance(resp, list):
             logger.warning("Prose expected a JSON array but got %s; leaving %d item(s) "

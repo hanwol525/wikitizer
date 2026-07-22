@@ -909,9 +909,12 @@ def test_validate_placement_rejects_double_placement():
     assert _validate_placement_decision(_pd(("AR#0", [1]), ("AR#1", [1])), evs, {0}, _setup_gaps())
 
 
-def test_validate_placement_rejects_duplicate_gap():
+def test_validate_placement_coalesces_duplicate_gap():
+    # Run-1.13: a repeated gap ID is BENIGN now -- the two event lists coalesce into one
+    # gap rather than failing as "gap listed more than once" (the error that burned all
+    # three retries and stranded every reign event). So this validates CLEANLY.
     evs = [hev("M", date_text="1350"), hev("R"), hev("S")]
-    assert _validate_placement_decision(_pd(("AR#0", [1]), ("AR#0", [2])), evs, {0}, _setup_gaps())
+    assert _validate_placement_decision(_pd(("AR#0", [1]), ("AR#0", [2])), evs, {0}, _setup_gaps()) == []
 
 
 def test_validate_placement_rejects_out_of_range_event():

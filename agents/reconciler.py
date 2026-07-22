@@ -23,7 +23,7 @@ from agents.base import BaseAgent, ClaudeJSONError, loads_tolerant, strip_code_f
 from agents.base_extractor import _normalize_for_match
 from models.lore import Alias, Character, HistoryEvent, Scope
 from models.reconcile import ReconcileDecision, DateDecision, PlacementDecision
-from player_map import declared_groups
+from player_map import declared_groups, declared_groups_with_players
 
 logger = logging.getLogger(__name__)
 
@@ -494,6 +494,10 @@ def _combine_group(members, canonical, allow_majority=False):
 # advisory candidate list surfaces spelling-close pairs so the model can't skip them.
 
 CANDIDATE_EDIT_THRESHOLD = 2   # names within this edit distance are surfaced (not merged)
+# Declared-name typo floor: a name one edit away from a DECLARED character name/alias is
+# folded in as a misspelling -- but only when BOTH names are at least this long, so
+# initials / very short names (CJ vs DJ) are never fuzzy-matched.
+DECLARED_TYPO_MIN_LEN = 4
 _ARTICLES = ("the ", "a ", "an ")
 
 
@@ -542,6 +546,52 @@ def _merge_identical_names(entries, label):
     return out
 
 
+def _merge_article_variants(entries, label):
+    """Force-merge entries whose names are IDENTICAL after stripping a leading article
+    ("The Citadel"/"Citadel", "The Kraken Clan"/"Kraken Clan") -- a pure-article difference
+    the identical-name floor misses (it keys the full name) and the LLM often leaves split
+    across a long list. An un-merged pair survives as two pages AND makes the cross-link
+    pass drop their shared surface as ambiguous ("claimed by 2 entities"), so neither
+    links. Runs AFTER _merge_identical_names on the post-decision result (first-seen order
+    preserved). Merges only on a leading the/a/an, so it CANNOT touch the descriptor
+    KIND-trap ("Krieger" vs "Krieger Imperium", which differ by a content word). Skipped
+    for HistoryEvent (event names are model-generated LABELS). A Character player_name
+    clash still vetoes via _combine_group -> two genuinely-different same-named PCs stay
+    separate."""
+    if not entries or isinstance(entries[0], HistoryEvent):
+        return list(entries)
+    groups = {}
+    order = []
+    for e in entries:
+        k = _strip_article(_name_key(e.name))
+        if k not in groups:
+            groups[k] = []
+            order.append(k)
+        groups[k].append(e)
+    out = []
+    for k in order:
+        members = groups[k]
+        if len(members) < 2:
+            out.append(members[0])
+            continue
+        # >=2 members here means DIFFERENT full names that collapse to one key only after
+        # stripping the article (identical names were already merged upstream) -- a genuine
+        # article variant. Merge, keeping the first-seen name as the heading.
+        try:
+            merged = _combine_group(members, members[0].name)
+        except _VetoMerge as veto:
+            logger.warning("%s Reconciler[%s]: article-variant merge of %s vetoed -- %s; "
+                           "kept separate.", REVIEW_PREFIX, label,
+                           [m.name for m in members], veto.message)
+            out.extend(members)
+            continue
+        logger.info("%s Reconciler[%s]: article-variant merge of %d entries -> '%s' (%s).",
+                    REVIEW_PREFIX, label, len(members), merged.name,
+                    ", ".join(m.name for m in members))
+        out.append(merged)
+    return out
+
+
 def _declared_canonical(members, ordered_names):
     """Heading for a declared-party merge: the member NAME matching the earliest name in
     the user's declared list (their preferred heading), else members[0].name. The
@@ -553,7 +603,18 @@ def _declared_canonical(members, ordered_names):
     return members[0].name
 
 
-def _merge_declared_characters(entries, label, groups):
+def _strip_aliases(entity, names_lower):
+    """Return a copy of `entity` with any alias whose text matches (case-insensitively) a
+    name in `names_lower` removed. Used after a player-named PC is folded into its declared
+    character, to keep the player's REAL name from surviving as an in-world alias
+    ('CJ (aka Hannah)'). Returns the entity unchanged when nothing matches."""
+    kept = [a for a in entity.aliases if a.text.strip().lower() not in names_lower]
+    if len(kept) == len(entity.aliases):
+        return entity
+    return entity.model_copy(update={"aliases": kept})
+
+
+def _merge_declared_characters(entries, label, groups, player_keys=None):
     """Deterministically merge the Character entries the user DECLARED as one character
     (grouped under one player in the player_map). Each group's names are aliases of ONE
     character, so any entries whose name OR alias falls in the same group are force-merged.
@@ -564,25 +625,71 @@ def _merge_declared_characters(entries, label, groups):
     extraction from the same map), so _combine_group won't veto -- but we still catch it.
     This is the ground-truth backstop for the reconciler's own (LLM + identical-name)
     merging: the user's declaration that Kriggy/Krigius/Ambrose are one character is
-    honored even if the model split them."""
+    honored even if the model split them.
+
+    `player_keys` (aligned with `groups`; None -> off) enables the PLAYER-NAME FOLD: a
+    character named exactly like a declared player (a player_map KEY that owns a declared
+    character group) is that player's PC mis-titled with the player's own name (e.g. a
+    'Sam' page that should be Krigius, or a 'Conrad' NPC page that should be CJ). It folds
+    into that player's declared character and the player's real name is stripped from the
+    result's aliases. We do NOT gate on is_pc/player_name: the extractor nulls player_name
+    for undeclared characters (config is authoritative), so gating on it would make this
+    fold impossible to fire in the real pipeline (the phantom arrives is_pc=True/False,
+    player_name=None). Trade-off (chosen by the user): a coincidental NPC sharing a
+    player's first name is swept in too -- so every fold is logged loudly [REVIEW]. This
+    removes the phantom page AND unblocks prose de-conflation (which otherwise bails
+    because the player's name is also an in-world character name)."""
     if not groups or label != "Character":
         return list(entries)
     group_sets = [set(g) for g in groups]
+    # Each declared player's own name -> its group index (aligned with `groups`).
+    player_to_gi = {pk: gi for gi, pk in enumerate(player_keys or [])}
 
     def _keys(entry):
         return {entry.name.strip().lower()} | {a.text.strip().lower() for a in entry.aliases}
 
     def _group_index(entry):
+        """Return (group_index, reason) or (None, None); reason in {exact, typo, player}."""
         keys = _keys(entry)
         for gi, gs in enumerate(group_sets):
             if keys & gs:
-                return gi
-        return None
+                return gi, "exact"
+        # Declared-name TYPO floor: a name one edit away from a declared name/alias (both
+        # >= DECLARED_TYPO_MIN_LEN chars, so initials/short names are never fuzzy-matched)
+        # is a misspelling of that declared character -> fold it in ("Kriggius" -> the
+        # declared "Krigius"). Anchored ONLY to ground-truth declared names, so the fuzzy
+        # match can't run wild across arbitrary entities. The typo name is kept as an
+        # alias (a real spelling variant, useful for cross-linking); the merge loop logs
+        # it [REVIEW].
+        for gi, gs in enumerate(group_sets):
+            for k in keys:
+                if len(k) >= DECLARED_TYPO_MIN_LEN and any(
+                        len(g) >= DECLARED_TYPO_MIN_LEN and _edit_distance(k, g) == 1
+                        for g in gs):
+                    return gi, "typo"
+        # Ground-truth fold: a character named exactly like a declared player (a
+        # player_map KEY owning a declared group) is that player's PC mis-titled with the
+        # player's own name -> fold it in. NOT gated on is_pc and NOT gated on a NULL
+        # player_name: the extractor nulls player_name for undeclared characters, so gating
+        # on it would make this dead code in the real pipeline. The one exception -- an
+        # EXPLICIT, contrary player_name (the LLM said a DIFFERENT player plays this one) --
+        # vetoes the name fold; it's inert in the real flow (player_name is null there) and
+        # just respects a stated contradiction. A coincidental NPC sharing a player's name
+        # IS swept in (accepted by the user); the merge loop logs every fold [REVIEW].
+        name_l = entry.name.strip().lower()
+        if name_l in player_to_gi:
+            pn = (getattr(entry, "player_name", None) or "").strip().lower()
+            if pn and pn != name_l:
+                return None, None
+            return player_to_gi[name_l], "player"
+        return None, None
 
     buckets = {}       # group index -> [members]
     plan = []          # output order: ("solo", entry) | ("group", gi) first-seen
+    folded = {}        # group index -> {player-name-str folded in} (to strip from aliases)
+    typo_folded = {}   # group index -> {typo name folded in} (logged [REVIEW], kept as alias)
     for e in entries:
-        gi = _group_index(e)
+        gi, reason = _group_index(e)
         if gi is None:
             plan.append(("solo", e))
         else:
@@ -590,6 +697,11 @@ def _merge_declared_characters(entries, label, groups):
                 buckets[gi] = []
                 plan.append(("group", gi))
             buckets[gi].append(e)
+            nm = e.name.strip().lower()
+            if reason == "player" and player_to_gi.get(nm) == gi:
+                folded.setdefault(gi, set()).add(nm)   # phantom -> strip player name from aliases
+            elif reason == "typo":
+                typo_folded.setdefault(gi, set()).add(e.name)
 
     out = []
     for kind, val in plan:
@@ -597,7 +709,16 @@ def _merge_declared_characters(entries, label, groups):
             out.append(val)
             continue
         members = buckets[val]
+        strip = folded.get(val)
         if len(members) < 2:
+            # A lone player-named phantom (no declared sibling character was extracted to
+            # fold into). We can't rename it to the declared PC without that PC's original
+            # casing, so keep it but surface it loudly for review.
+            if strip:
+                logger.warning("%s Reconciler[%s]: character %r is named after declared "
+                               "player(s) %s but no declared sibling character exists to fold "
+                               "it into; leaving it as-is for review.", REVIEW_PREFIX, label,
+                               members[0].name, sorted(strip))
             out.append(members[0])
             continue
         canonical = _declared_canonical(members, groups[val])
@@ -609,6 +730,17 @@ def _merge_declared_characters(entries, label, groups):
                            [m.name for m in members], veto.message)
             out.extend(members)
             continue
+        if strip:
+            merged = _strip_aliases(merged, strip)   # keep the player's real name out of aliases
+            logger.warning("%s Reconciler[%s]: folded character(s) named after player(s) %s "
+                           "into declared character %r (ground-truth player_map fold -- verify "
+                           "none is a coincidental NPC sharing a player's name).",
+                           REVIEW_PREFIX, label, sorted(strip), merged.name)
+        tf = typo_folded.get(val)
+        if tf:
+            logger.warning("%s Reconciler[%s]: folded likely-misspelling(s) %s into declared "
+                           "character %r (one edit from a declared name).",
+                           REVIEW_PREFIX, label, sorted(tf), merged.name)
         logger.info("Reconciler[%s]: declared-party merge of %d entries -> %r.",
                     label, len(members), merged.name)
         out.append(merged)
@@ -771,6 +903,13 @@ def _valid_merge_subset(decision, entries, label):
 # date. Events woven here get calendar_system=None (the label is internal only).
 UNDATED = "(undated)"
 
+# A calendar-system LABEL that betrays an UNRESOLVED present-relative offset: the LLM was
+# told to resolve "200 years ago" to an absolute year, but sometimes it instead invents a
+# "years ago" system whose parts are the raw offset magnitudes. Those count BACKWARDS
+# (bigger = older), so ascending-sorting them renders the timeline in reverse. We detect
+# and drop such a system to relative placement rather than show a reversed dated timeline.
+_UNRESOLVED_OFFSET_SYSTEM_RE = re.compile(r"years?\s+ago|before\s+present|\bago\b", re.IGNORECASE)
+
 
 def _gap_id(system: str, k: int) -> str:
     """The ID for gap k of a system. Gap k sits immediately BEFORE rank-group k
@@ -920,30 +1059,44 @@ def _build_spine_and_gaps(dated):
     return spines, gap_lookup
 
 
+def _coalesce_placements(placements):
+    """Merge repeated gap IDs into one entry per gap, concatenating their event lists
+    (first-seen order, de-duplicated within the gap). The LLM sometimes emits the SAME gap
+    in two GapPlacement objects when several events share a gap; that is benign -- combine
+    them rather than treating it as a fatal 'gap listed more than once' (the error that
+    burned all three retries in the run and stranded every reign event). Returns a list of
+    (gap_id, [event indices]) in first-seen gap order."""
+    order = []
+    merged = {}
+    for p in placements:
+        if p.gap not in merged:
+            merged[p.gap] = []
+            order.append(p.gap)
+        for idx in p.events:
+            if idx not in merged[p.gap]:
+                merged[p.gap].append(idx)
+    return [(g, merged[g]) for g in order]
+
+
 def _validate_placement_decision(decision, events, dated_indices, gap_lookup) -> list:
     """Structural sanity-check on Call 2's PlacementDecision BEFORE weaving. Returns
-    a list of problems; empty == clean. (Brief B retries on any problem.)
-
-    Checks:
+    a list of problems; empty == clean. (Brief B retries on any problem.) Runs on the
+    COALESCED placements, so a repeated gap ID is no longer a failure -- it is combined
+    (see _coalesce_placements). What remains fatal:
       1. every `gap` is a real gap ID Python handed out (in gap_lookup)
-      2. no gap appears in more than one placement (so the gap->events dict can't
-         silently drop a collision)
-      3. every event index is in range
-      4. every placed event is a RELATIVE event -- NOT one of the dated_indices (a
+      2. every event index is in range
+      3. every placed event is a RELATIVE event -- NOT one of the dated_indices (a
          dated event's position is Python's, not the LLM's to move)
-      5. no event index appears in more than one gap (no double-placement)
+      4. no event index appears in more than one DIFFERENT gap (no double-placement;
+         the same event repeated within one gap is de-duped by coalescing, not flagged)
     """
     problems = []
     n = len(events)
-    seen_gaps = set()
     seen_events = set()
-    for p in decision.placements:
-        if p.gap not in gap_lookup:
-            problems.append(f"placement: unknown gap {p.gap!r}")
-        if p.gap in seen_gaps:
-            problems.append(f"placement: gap {p.gap!r} listed more than once")
-        seen_gaps.add(p.gap)
-        for idx in p.events:
+    for gap, evs in _coalesce_placements(decision.placements):
+        if gap not in gap_lookup:
+            problems.append(f"placement: unknown gap {gap!r}")
+        for idx in evs:
             if idx < 0 or idx >= n:
                 problems.append(f"placement: event index {idx} out of range 0..{n - 1}")
                 continue
@@ -953,6 +1106,43 @@ def _validate_placement_decision(decision, events, dated_indices, gap_lookup) ->
                 problems.append(f"placement: event {idx} placed in more than one gap")
             seen_events.add(idx)
     return problems
+
+
+def _valid_placement_subset(decision, events, dated_indices, gap_lookup) -> dict:
+    """Salvage only the VALID placements from a decision that failed whole-decision
+    validation -- the per-gap version of `_validate_placement_decision`. A gap with an
+    unknown ID is dropped whole; within a kept gap, an event index that is out of range,
+    is a dated event, or was already placed in another gap is dropped; the rest are kept.
+    So one bad gap/event no longer strands every relative event in Could Not Place (the
+    all-or-nothing failure the run exposed). Returns {gap_id: [event indices]} ready for
+    _weave_and_stamp."""
+    n = len(events)
+    seen_events = set()
+    kept = {}
+    for gap, evs in _coalesce_placements(decision.placements):
+        if gap not in gap_lookup:
+            logger.warning("%s Timeline placement: dropping unknown gap %r (%d event(s)).",
+                           REVIEW_PREFIX, gap, len(evs))
+            continue
+        good = []
+        for idx in evs:
+            if idx < 0 or idx >= n:
+                logger.warning("%s Timeline placement: dropping out-of-range event index %r.",
+                               REVIEW_PREFIX, idx)
+                continue
+            if idx in dated_indices:
+                logger.warning("%s Timeline placement: dropping event %r ('%s') -- it is dated, "
+                               "not a relative event.", REVIEW_PREFIX, idx, events[idx].name)
+                continue
+            if idx in seen_events:
+                logger.warning("%s Timeline placement: dropping event %r ('%s') -- already placed "
+                               "in another gap.", REVIEW_PREFIX, idx, events[idx].name)
+                continue
+            seen_events.add(idx)
+            good.append(idx)
+        if good:
+            kept[gap] = good
+    return kept
 
 
 def _weave_and_stamp(events, spines, placements, gap_lookup):
@@ -1039,6 +1229,8 @@ But do NOT let this rule block a merge when a longer and a shorter name clearly 
 - "The Imperium" and "Krieger Imperium" -> the same empire (article/name variant). MERGE.
 - "Krieger family" and "Krieger royal family" -> the same family (descriptor). MERGE.
 - "Free Islands" and "Dwarven Free Islands" -> the same territory. MERGE.
+- Two names for the SAME realm or group that differ only by an interchangeable SYNONYM or translation of one word -- "Krieger Empire" and "Krieger Imperium" (Empire = Imperium), "the Free City" and "the Free Town" -- are one entity. MERGE. (Unlike the person-vs-realm trap above, the KIND is the same here; only a synonym word differs.)
+- A bare group name and that same group named by its homeland or origin, when the lore itself ties them together -- "Orcs" and "Orcs of the frozen wild" where the text says the orcs come from the frozen wild -- is ONE people described broadly and by where they live, NOT a new subgroup. MERGE.
 The test is KIND, not length: two names for the ONE same thing merge; a person and the empire named after them stay apart even though one name contains the other.
 
 ## Worked examples -- follow these closely
@@ -1114,6 +1306,7 @@ Some events give their date as an offset from the present ("200 years ago", "40 
 - Find the reference year. If one is provided in the input as "Reference year (present-day), from config: N", USE THAT -- it overrides everything. Otherwise, if an event states the campaign's current/present/starting year (e.g. "the party is in 1424", "the starting year of 1424"), use that. If you can determine NO reference year, leave every present-relative-offset event OUT (it is handled as an undated event).
 - Resolve by SUBTRACTING the offset from the reference year: reference 1424, "200 years ago" -> parts [1224]; "40 years ago" -> [1384]. Read written-out numbers ("two centuries ago" -> 200 years). Put the result in `parts`, on the SAME scale/label as the absolute dates in that calendar (e.g. "AR years"), and set "anchor_relative": true for that event.
 - Report the reference year you used in the top-level "reference_year" (and its calendar in "reference_system"), or null if you used none.
+- NEVER create a calendar system named "years ago" / "N years ago" / "before present" with the raw offset as its parts. A raw offset counts BACKWARDS (a bigger number is an OLDER event), so it would sort the timeline in REVERSE. Either resolve it to an absolute year on the shared scale (subtract from the reference year, as above), or -- if you have no reference year -- leave the event out entirely.
 - A DURATION ("a 200-year war", "30 years of fighting") is NOT a present-relative offset -- it is a span, not a point in time. A clue relative to another EVENT ("before the Empire fell") is NOT one either. Leave both out.
 
 ## CRITICAL: only in-world, stated information
@@ -1179,8 +1372,13 @@ class Reconciler(BaseAgent):
         kwargs.setdefault("max_tokens", 8192)
         super().__init__(**kwargs)
         # The declared party -> per-player normalized name-lists, for the deterministic
-        # declared-merge floor (Characters only). Empty when no party is configured.
-        self._declared_groups = declared_groups(player_map or {})
+        # declared-merge floor (Characters only). Empty when no party is configured. Keep
+        # the owning player key alongside each group (aligned lists) so a character
+        # mis-named after a player -- the player minted as their own PC -- folds into that
+        # player's declared character.
+        self._declared_pairs = declared_groups_with_players(player_map or {})
+        self._declared_groups = [names for _, names in self._declared_pairs]
+        self._declared_player_keys = [player for player, _ in self._declared_pairs]
 
     def reconcile(self, entries: list) -> list:
         # 0 or 1 entries can't contain a duplicate -> nothing to do, and don't spend
@@ -1221,7 +1419,8 @@ class Reconciler(BaseAgent):
                 logger.error("Reconciler[%s]: no usable decision after 3 attempts; "
                              "returning %d entries unmerged.", label, len(entries))
                 return _merge_declared_characters(
-                    _merge_identical_names(list(entries), label), label, self._declared_groups)
+                    _merge_identical_names(list(entries), label), label,
+                    self._declared_groups, self._declared_player_keys)
             # Parsed but never fully clean. Instead of discarding EVERY merge over one
             # bad group (the all-or-nothing failure that stranded ~40 good merges in a
             # 115-entry run), salvage the valid groups and drop only the broken ones.
@@ -1232,10 +1431,13 @@ class Reconciler(BaseAgent):
 
         # Deterministic floors over the LLM's result: (1) force-merge any same-name
         # entries the model silently left separate (a no-op when it merged everything),
-        # then (2) force-merge the Character entries the user DECLARED as one character
-        # in the player_map. Both run on the merged output, so no index conflict.
+        # (2) force-merge pure-article variants ("The Citadel"/"Citadel") the model left
+        # split, then (3) force-merge the Character entries the user DECLARED as one
+        # character in the player_map. All run on the merged output, so no index conflict.
         merged = _merge_identical_names(self._apply(decision, entries, label), label)
-        return _merge_declared_characters(merged, label, self._declared_groups)
+        merged = _merge_article_variants(merged, label)
+        return _merge_declared_characters(merged, label, self._declared_groups,
+                                          self._declared_player_keys)
 
     def _build_user_message(self, entries) -> str:
         label = _type_label(entries[0])
@@ -1420,6 +1622,15 @@ class Reconciler(BaseAgent):
 
         dated = []
         for d in decision.dated:
+            if _UNRESOLVED_OFFSET_SYSTEM_RE.search(d.system or ""):
+                # A "years ago"-style system means the LLM left a present-offset unresolved
+                # (raw magnitudes sort backwards -> reversed timeline). Drop it to relative
+                # placement rather than render a reversed dated timeline.
+                logger.warning("%s Timeline: system label %r for '%s' is an unresolved "
+                               "present-offset (raw 'years ago' magnitudes sort backwards); "
+                               "dropping it to relative placement.",
+                               REVIEW_PREFIX, d.system, events[d.index].name)
+                continue
             if _sanity_guard_parts(d.parts, events[d.index].date_text, d.anchor_relative):
                 dated.append((d.index, d.system, d.parts))
             else:
@@ -1435,25 +1646,36 @@ class Reconciler(BaseAgent):
         spine still stamps)."""
         relative = [i for i in range(len(events)) if i not in dated_indices]
         decision = None
+        last_parsed = None  # last decision that PARSED (may be structurally invalid)
         for attempt in range(3):
             raw = self.call_claude(
                 PLACEMENT_PROMPT, self._build_placement_message(events, dated_indices, spines))
-            decision = _parse_json_model(raw, PlacementDecision)
-            if decision is None:
+            parsed = _parse_json_model(raw, PlacementDecision)
+            if parsed is None:
                 logger.warning("Timeline placement: bad JSON (attempt %d/3); raw: %r", attempt + 1, raw)
                 continue
-            problems = _validate_placement_decision(decision, events, dated_indices, gap_lookup)
+            last_parsed = parsed
+            problems = _validate_placement_decision(parsed, events, dated_indices, gap_lookup)
             if problems:
                 logger.warning("Timeline placement: invalid (attempt %d/3): %s",
                                attempt + 1, "; ".join(problems))
-                decision = None
                 continue
+            decision = parsed
             break
         if decision is None:
-            logger.error("Timeline placement: no usable decision after 3 attempts; "
-                         "%d relative event(s) -> Could Not Place.", len(relative))
-            return {}
-        return {p.gap: p.events for p in decision.placements}
+            if last_parsed is None:
+                logger.error("Timeline placement: no usable decision after 3 attempts; "
+                             "%d relative event(s) -> Could Not Place.", len(relative))
+                return {}
+            # Parsed but never fully clean -> salvage the valid placements instead of
+            # stranding every relative event in Could Not Place over one bad gap/event.
+            salvaged = _valid_placement_subset(last_parsed, events, dated_indices, gap_lookup)
+            logger.warning("%s Timeline placement: no fully-clean decision after 3 attempts; "
+                           "using %d salvageable gap placement(s).", REVIEW_PREFIX, len(salvaged))
+            return salvaged
+        # Coalesce here too: validation now allows a repeated gap (it's benign), so a clean
+        # decision can still carry one -- combine rather than let a dict-comp drop it.
+        return {g: evs for g, evs in _coalesce_placements(decision.placements)}
 
     def _build_date_message(self, events, current_year: Optional[int] = None) -> str:
         """Call 1's user message: only the events that actually state a date, each with its

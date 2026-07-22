@@ -47,6 +47,8 @@ A "named location" is any place with a proper name: a lake, mountain range, city
 
 A business, company, shop, guild, or brewery is NOT a location even when its name contains a place-word (e.g. "Wizard's Tower Brewing Company") — it is an organization, captured by the organizations extractor. Extract a place here only when it is a geographic place, landmark, or building in its own right, not a business named after or housed in one.
 
+A HOLIDAY, festival, feast, ceremony, tradition, event, or celebration is NOT a location, even when it happens at a place (e.g. "Octobusfest"). Do NOT create a location for it. If a message ties such an event to a real named place, record it instead as a DETAIL of that place — for example, on the town that hosts it: a detail like "Hosts the Octobusfest celebration", paired with the quote that states it. A location is a physical place you could stand in; do not mint one for a non-place thing (a holiday, a people, an organization, an item, or an abstract concept). When a message describes a non-place thing happening AT a named place, capture the place and fold the fact into that place's details rather than inventing a separate location for the thing itself.
+
 For each named location, extract:
 - name: the location's primary/canonical name.
 - aliases: a list of any OTHER names the same location is called (empty list if none). For example, if a lake is called both "The Great Well" and "The Pond", those are aliases of it.
@@ -129,7 +131,8 @@ class LocationsExtractor(BaseExtractor):
                     "Location detail missing a string 'detail'/'quote', ignoring: %r", d
                 )
                 continue
-            q = self._resolve_quote(quote_text, d.get("source_id"), batch)
+            q = self._resolve_quote(quote_text, d.get("source_id"), batch,
+                                    detail_text=detail_text)
             if q is None:
                 # _resolve_quote already logged the specific reason (bad id /
                 # not verbatim); dropping the whole detail without re-logging.

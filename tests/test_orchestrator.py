@@ -11,7 +11,7 @@ suite offline: no network, no API key, no `integration` marker.
 Two isolation seams are used on purpose:
   * `_build_agents` is overridden (the brief's seam) to swap in stub agents.
   * The pure parse+filter step lives directly in `run()` (not in an agent), so a
-    `monkeypatch` fixture replaces `orchestrator.parse_chat_log` /
+    `monkeypatch` fixture replaces `orchestrator.parse_messages` /
     `orchestrator.filter_reactions` with canned message output -- fully isolating
     the orchestrator from the Phase 2 parser's file format. ONE additive test
     (`test_run_over_a_real_parsed_log`) skips that monkeypatch and feeds a real
@@ -213,9 +213,9 @@ class _StubbedOrchestrator(Orchestrator):
 def patched_parse(monkeypatch):
     """Replace the pure parse+filter step so run() gets a canned, non-empty message
     list without any real file. Isolates the orchestrator from the parser format."""
-    def fake_parse(filepath, speaker_map):
+    def fake_parse(filepath, speaker_map, input_format="auto"):
         return [build_message("Alice", "Riverton sits on the river Mund.", "group.txt")]
-    monkeypatch.setattr(orchestrator, "parse_chat_log", fake_parse)
+    monkeypatch.setattr(orchestrator, "parse_messages", fake_parse)
     monkeypatch.setattr(orchestrator, "filter_reactions", lambda msgs: list(msgs))
 
 
@@ -223,10 +223,10 @@ def patched_parse(monkeypatch):
 def patched_parse_multi(monkeypatch):
     """Like patched_parse, but tags each message with its file's BARE name, so a
     multi-file `files` list yields multi-source messages (what exclusion needs)."""
-    def fake_parse(filepath, speaker_map):
+    def fake_parse(filepath, speaker_map, input_format="auto"):
         name = Path(filepath).name
         return [build_message("Alice", f"Content from {name}.", name)]
-    monkeypatch.setattr(orchestrator, "parse_chat_log", fake_parse)
+    monkeypatch.setattr(orchestrator, "parse_messages", fake_parse)
     monkeypatch.setattr(orchestrator, "filter_reactions", lambda msgs: list(msgs))
 
 
@@ -355,9 +355,10 @@ def test_shared_client_threads_into_every_agent():
 
 def test_run_over_a_real_parsed_log(tmp_path, caplog):
     """Additive hardening beyond the brief's 8 groups: skip the parse monkeypatch
-    and feed a REAL minimal group log, so parse_chat_log's arg order and the
-    filter_reactions wiring are exercised for real (a swapped-arg regression the
-    monkeypatched tests would mask). Stubs still handle the agent layer."""
+    and feed a REAL minimal group log, so the parse_messages -> (auto-detect ->
+    parse_chat_log) arg order and the filter_reactions wiring are exercised for real
+    (a swapped-arg regression the monkeypatched tests would mask). The legacy format
+    is auto-detected from its dashes row. Stubs still handle the agent layer."""
     caplog.set_level(logging.INFO)
     log = tmp_path / "group.txt"
     # Minimal but valid group export: participant header (leads with a comma), the

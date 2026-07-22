@@ -50,6 +50,7 @@ Do NOT extract a generic, unnamed object that has no name and no such tie ("a sw
 
 Boundary with the other extractors:
 - A place, a person, an organization, and a people or culture are NOT items — those are other extractors. An item is a physical object you could in principle pick up or carry.
+- FIXED INFRASTRUCTURE is NOT an item, even though it is physical and man-made: a railroad, road, highway, bridge, canal, aqueduct, wall, gate, fortification, tower, building, monument, or dam is a structure you could never pick up or carry (e.g. "the Continental Railroad", "the King's Road", "the Great Wall"). Skip it here — such a structure belongs to the locations extractor, or stays a detail of the place it serves; it is NEVER an item. The test is portability: if one person could not in principle carry it, it is not an item.
 
 For each item, extract:
 - name: the item's primary/canonical name (or your short descriptive label if it has no proper name).
@@ -124,7 +125,8 @@ class ItemExtractor(BaseExtractor):
             if not isinstance(detail_text, str) or not isinstance(quote_text, str):
                 logger.warning("Item detail missing a string 'detail'/'quote', ignoring: %r", d)
                 continue
-            q = self._resolve_quote(quote_text, d.get("source_id"), batch)
+            q = self._resolve_quote(quote_text, d.get("source_id"), batch,
+                                    detail_text=detail_text)
             if q is None:                       # _resolve_quote already logged why
                 continue
             details_out.append(Detail(text=detail_text, source_files=[q.source_file]))

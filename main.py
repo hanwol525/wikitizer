@@ -70,6 +70,25 @@ def parse_args(argv=None):
              "--files is a hard error (exclusion.validate_exclusions, inside run()).",
     )
     parser.add_argument(
+        "--speaker-map", default=SPEAKER_MAP_PATH, metavar="PATH",
+        help="Path to the speaker map JSON (default: %(default)s). Override to run a "
+             "different setup without touching the default -- e.g. a name-keyed "
+             "config/speaker_map.imessage.json for an imessage-exporter run alongside "
+             "your phone-keyed legacy map.",
+    )
+    parser.add_argument(
+        "--player-map", default=PLAYER_MAP_PATH, metavar="PATH",
+        help="Path to the declared-party JSON (default: %(default)s). Override to point "
+             "at a different party file (same reason as --speaker-map).",
+    )
+    parser.add_argument(
+        "--input-format", choices=["auto", "imessage", "legacy"], default="auto",
+        help="Chat-log format of --files: 'imessage' (a structured imessage-exporter "
+             "TXT export), 'legacy' (the copy-pasted iMessage .txt), or 'auto' "
+             "(default: sniff each file). The two are trivially distinguishable, so "
+             "'auto' is right for almost everyone.",
+    )
+    parser.add_argument(
         "--current-year", type=int, default=None, metavar="YEAR",
         help="The campaign's present-day reference year (e.g. 1424). Lets the timeline "
              "resolve present-relative dates ('200 years ago' -> 1224). Omit to let the "
@@ -181,13 +200,28 @@ def main(argv=None) -> None:
     # Load BOTH config files up front. If either is missing/malformed this raises
     # HERE -- before any paid LLM call -- which is exactly what we want (fail cheap).
     config = PipelineConfig(
-        speaker_map=load_speaker_map(SPEAKER_MAP_PATH),
+        speaker_map=load_speaker_map(args.speaker_map),
         crosslink_words=load_crosslink_words(CROSSLINK_WORDS_PATH),
         current_year=args.current_year,
         # The declared party (gitignored, may be absent -> {}). Assigns player_name
         # authoritatively and merges each player's declared aliases as one character.
-        player_map=load_player_map(PLAYER_MAP_PATH),
+        player_map=load_player_map(args.player_map),
+        input_format=args.input_format,
     )
+
+    # Player/character disambiguation is only as good as the declared party. With no
+    # config/player_map.json, the LLM's player guesses are un-anchored -- Sam/Kriggy-style
+    # conflations and duplicate PC pages become far more likely. Warn LOUDLY (but do not
+    # abort: a fresh clone / the synthetic path can still run) so the user knows to create
+    # it. This is the soft "requirement": when the map IS present it is the source of truth
+    # (the extractor drops any LLM player guess for an undeclared character).
+    if not config.player_map:
+        logging.getLogger(__name__).warning(
+            "[REVIEW] No player_map configured (%s is missing or empty); character/player "
+            "disambiguation is disabled and PCs may duplicate or be mis-attributed. Create "
+            "it (see --confirm-players) to make the declared party the source of truth.",
+            PLAYER_MAP_PATH,
+        )
 
     # A bad --exclude-sources name raises ValueError from inside run(), before any
     # paid call. The CLI deliberately does NOT re-check it: validate_exclusions lives

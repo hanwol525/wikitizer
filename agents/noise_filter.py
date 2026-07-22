@@ -33,16 +33,23 @@ Design notes / the "why" behind the shapes here:
     forever. Erring toward ``ambiguous`` costs a trickle of extra tokens; erring
     toward ``noise`` costs lore. So validation here is deliberately strict and
     paranoid, and every coercion is logged.
-  * **Sequential on purpose.** Batches are fully independent, so the Phase 4
-    orchestrator can fan them out over its ThreadPoolExecutor. Keeping
-    :meth:`classify` sequential here makes it simple and deterministic to test;
-    the parallelism is the orchestrator's job, not the agent's.
+  * **Sequential by default, parallel by opt-in.** Batches are fully independent
+    (batch-local ids, no cross-batch state), so classifying them concurrently only
+    speeds up the wall clock -- the labels and their order are identical. But since
+    this is the highest-volume stage, running batches one at a time on a slow backend
+    is the pipeline's worst "looks frozen" wait. So :meth:`classify` takes a
+    ``max_workers`` knob: the **default 1 keeps it strictly sequential** (simple,
+    deterministic, byte-identical for tests), and the orchestrator passes a higher
+    value to fan the batches out over a thread pool. Results are always collected in
+    submission order, so a parallel run returns the exact same input-ordered labels.
 """
 
 import json
 import logging
+from concurrent.futures import ThreadPoolExecutor
 
 from agents.base import BaseAgent, ClaudeJSONError
+from agents.llm_client import DEFAULT_CHEAP_MODEL
 from models.message import Message
 
 logger = logging.getLogger(__name__)
@@ -59,7 +66,7 @@ Label every message with exactly one of these four labels:
 - noise — anything with no worldbuilding or game content: reactions, "lol"/"ok"/"nice", off-topic chatter, logistics, single-word filler. This ALSO covers out-of-world, real-world, or meta / out-of-character content that is not part of THIS fictional setting — a real-world brand or product, a character explicitly framed as "a regular person from Earth" or imported from another game/show, isekai / "hit by a truck" jokes, a reference to "my character in my OTHER campaign", and similar out-of-character riffs. Even when it is phrased like lore (a proper name, a backstory), content explicitly framed as NOT part of this fictional world is noise, not lore.
 - ambiguous — you genuinely cannot tell whether it carries worldbuilding. Use this ONLY for real uncertainty, not to avoid deciding. If a message MIGHT carry worldbuilding but you're unsure, prefer ambiguous over noise so it isn't lost.
 
-The tricky boundary is lore vs mechanic. Judge by whether the message tells you something about the WORLD or something about the GAME at the table. A message can name game terms and still be lore if it states a fact about the world — "the royal family is human" is lore even though "human" is a game race. Conversely "what's your AC" or "is that spell banned" is mechanic even if it mentions in-world things.
+The tricky boundary is lore vs mechanic. Judge by whether the message tells you something about the WORLD or something about the GAME at the table. A message can name game terms and still be lore if it states a fact about the world — "the royal family is human" is lore even though "human" is a game race. Conversely "what's your AC" or "is that spell banned" is mechanic even if it mentions in-world things. One important case: a statement that ESTABLISHES a specific character — giving a NAMED character a race, class, origin, or defining trait ("Ryan is playing a warforged named Ned", "my character Ned is a warforged", "Sam's character is the exiled prince Kriggy") — is LORE, because it defines someone who exists in the world, even though it names a real player and a game race/class. Only vague, tentative build talk with NO named character ("maybe I'll play a dwarf tank", "thinking of a warlock") stays mechanic.
 
 INPUT: you will receive a JSON array of messages, each an object with an "id" (integer) and a "content" (string).
 
@@ -80,12 +87,16 @@ class NoiseFilterAgent(BaseAgent):
     only the prompt, the batching, and the strict response validation.
     """
 
-    def __init__(self, batch_size: int = 50, **kwargs):
+    def __init__(self, batch_size: int = 50, max_workers: int = 1, **kwargs):
         if batch_size < 1:
             raise ValueError("batch_size must be >= 1")
-        # Haiku: this is the highest-volume agent (sees every surviving message),
-        # and labeling into 4 buckets needs speed + low cost, not deep reasoning.
-        kwargs.setdefault("model", "claude-haiku-4-5-20251001")
+        if max_workers < 1:
+            raise ValueError("max_workers must be >= 1")
+        # Haiku by default: this is the highest-volume agent (sees every surviving
+        # message), and labeling into 4 buckets needs speed + low cost, not deep
+        # reasoning. Standalone fallback only -- the orchestrator passes an explicit
+        # per-role model (which may route this role to a cheaper GLM via OpenRouter).
+        kwargs.setdefault("model", DEFAULT_CHEAP_MODEL)
         # Classification wants boring + repeatable, not creative.
         kwargs.setdefault("temperature", 0.0)
         super().__init__(**kwargs)
@@ -94,6 +105,10 @@ class NoiseFilterAgent(BaseAgent):
         # worse reliability and more output tokens per call. 50 is a safe start;
         # it's a tuning knob, not a constant.
         self.batch_size = batch_size
+        # How many batches to classify concurrently. 1 (default) = strictly
+        # sequential; the orchestrator raises it to fan batches over a thread pool
+        # (the shared client is thread-safe). Also named so it isn't forwarded.
+        self.max_workers = max_workers
 
     def classify(self, messages: list[Message]) -> list[tuple[Message, str]]:
         """Pair every input message with its label, in the original input order.
@@ -102,14 +117,29 @@ class NoiseFilterAgent(BaseAgent):
         each batch independently (a bad batch is contained -- it can't take the
         rest of the run down with it). Empty input short-circuits to ``[]`` with
         no API call.
+
+        With ``self.max_workers > 1`` the batches are classified concurrently over
+        a thread pool; results are stitched back together in **batch (input)
+        order** regardless, so the output is identical to the sequential path --
+        only faster.
         """
         if not messages:
             return []
 
+        batches = [messages[start:start + self.batch_size]
+                   for start in range(0, len(messages), self.batch_size)]
+
+        if self.max_workers <= 1 or len(batches) <= 1:
+            per_batch = [self._classify_batch(b) for b in batches]
+        else:
+            # map() yields results in submission order, so labels stay input-ordered
+            # even though batches finish out of order. Cap workers at the batch count.
+            with ThreadPoolExecutor(max_workers=min(self.max_workers, len(batches))) as pool:
+                per_batch = list(pool.map(self._classify_batch, batches))
+
         results: list[tuple[Message, str]] = []
-        for start in range(0, len(messages), self.batch_size):
-            batch = messages[start:start + self.batch_size]
-            results.extend(self._classify_batch(batch))
+        for labeled in per_batch:
+            results.extend(labeled)
         return results
 
     def _classify_batch(self, batch: list[Message]) -> list[tuple[Message, str]]:
@@ -134,6 +164,18 @@ class NoiseFilterAgent(BaseAgent):
                 "Noise filter batch failed to return valid JSON; labeling all %d "
                 "message(s) 'ambiguous'. %s",
                 len(batch), exc,
+            )
+            return [(msg, "ambiguous") for msg in batch]
+        except Exception as exc:
+            # ANY other call/parse failure (a raw json.JSONDecodeError -- a sibling of
+            # ClaudeJSONError, not caught above -- a RecursionError from json_repair, or a
+            # provider/adapter error) still resolves to the universal 'ambiguous' fallback:
+            # never lose a message, and never let one bad batch raise out of a parallel
+            # classify() and take the whole run down.
+            logger.error(
+                "Noise filter batch failed unexpectedly (%s); labeling all %d "
+                "message(s) 'ambiguous'. %s",
+                type(exc).__name__, len(batch), exc,
             )
             return [(msg, "ambiguous") for msg in batch]
 

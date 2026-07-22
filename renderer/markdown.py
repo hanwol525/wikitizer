@@ -31,6 +31,77 @@ def _flatten(text: str) -> str:
     return re.sub(r"\s+", " ", text).strip()
 
 
+# Function words kept lowercase inside a title-cased name (never the first token). Matches
+# the campaign's real entities ("Houses of Maltaav", "The 12 Houses of Maltraav").
+_TITLE_STOPWORDS = frozenset(
+    "a an and at by for from in of on or the to vs with".split()
+)
+
+
+def _cap_token(tok: str) -> str:
+    """Capitalize the first letter of each HYPHEN-separated part, lowercasing the rest --
+    so a hyphen starts a new word ("half-elf" -> "Half-Elf") but an apostrophe does NOT
+    ("crown's" -> "Crown's", "MAL'TAAV" -> "Mal'taav", never "Crown'S"/"Mal'Taav")."""
+    return "-".join(p[:1].upper() + p[1:].lower() for p in tok.split("-"))
+
+
+def _is_screaming(tok: str) -> bool:
+    letters = [c for c in tok if c.isalpha()]
+    return bool(letters) and all(c.isupper() for c in letters)
+
+
+def _normalize_display_name(name: str) -> str:
+    """Render an entity/event name in one canonical Title Case regardless of how it was typed
+    in chat, WITHOUT disturbing names that are already well-cased.
+
+    Two paths:
+      * A SINGLE-CASE name (every letter upper, or every letter lower) that has an alphabetic
+        word >= 4 chars is fully title-cased: each token capitalized (apostrophe/hyphen-safe
+        via _cap_token), the first token always capitalized, and interior stop-words lowered.
+        This fixes both "CROWN'S NEST" and "crown's nest" -> "Crown's Nest", and
+        "the deathsworn" -> "The Deathsworn". The >=4 guard preserves short all-caps
+        acronyms/initials ("CJ", "DM", "FBI").
+      * Otherwise (MIXED case, or no long word) only a screaming ALL-CAPS token >= 4 is
+        title-cased ("Lake MUNDI" -> "Lake Mundi"); an already-good mixed name ("Lake Mundi",
+        "McDonald's") and short acronyms are left UNCHANGED.
+
+    Purely cosmetic: the reconciler already merged case-variants (_name_key lowercases) and
+    slug anchors lowercase too, so this creates no new pages and shifts no anchors."""
+    letters = [c for c in name if c.isalpha()]
+    single_case = bool(letters) and (
+        all(c.isupper() for c in letters) or all(c.islower() for c in letters))
+    has_long_word = any(len(w) >= 4 for w in re.findall(r"[A-Za-z]+", name))
+
+    if single_case and has_long_word:
+        out = []
+        first = True
+        for tok in name.split(" "):
+            if not tok:                      # keep any double-space structure intact
+                out.append(tok)
+                continue
+            capped = _cap_token(tok)
+            if not first and capped.lower() in _TITLE_STOPWORDS:
+                capped = capped.lower()
+            out.append(capped)
+            first = False
+        return " ".join(out)
+
+    # Mixed case (or a short all-caps acronym): only tame a screaming ALL-CAPS word.
+    tokens = name.split(" ")
+    if not any(_is_screaming(t) and sum(c.isalpha() for c in t) >= 4 for t in tokens):
+        return name
+    return " ".join(_cap_token(t) if _is_screaming(t) else t for t in tokens)
+
+
+_LEADING_ARTICLE_RE = re.compile(r"^(?:the|a|an)\s+", re.IGNORECASE)
+
+
+def _alpha_key(name: str) -> str:
+    """Alphabetical sort key that ignores a leading article, so "The Deathsworn" files
+    under D (not T) while the article stays in the displayed name. Case-insensitive."""
+    return _LEADING_ARTICLE_RE.sub("", name).strip().lower()
+
+
 def _is_renderable(entity) -> bool:
     """True if an entity has anything to show: a polished prose body, at least one
     detail, or at least one supporting quote (a footnote). A name-only entity with
@@ -203,7 +274,7 @@ def render_history(events, cmap: CrosslinkMap, registry: FootnoteRegistry) -> st
         only_content = (n_systems == 0 and not undated)
         if not only_content:
             blocks.append("### Could Not Place")
-        rows = sorted(could_not_place, key=lambda r: (r[0].name, r[2]))
+        rows = sorted(could_not_place, key=lambda r: (_alpha_key(r[0].name), r[2]))
         blocks.append(_bullets(rows, cmap, registry))
 
     # Blank line between every block so markdown doesn't fuse a heading into the
@@ -264,7 +335,7 @@ def _render_entity_section(label: str, pairs, cmap: CrosslinkMap,
         return ""
     # Alphabetical by name; the anchor (always present, always unique) is the
     # tiebreak, so two same-named entries render in a stable order every run.
-    rows = sorted(pairs, key=lambda p: (p[0].name, p[1]))
+    rows = sorted(pairs, key=lambda p: (_alpha_key(p[0].name), p[1]))
     bodies = "\n\n".join(_render_entity(ent, anchor, cmap, registry)
                          for ent, anchor in rows)
     return f"## {label}\n\n{bodies}"
@@ -311,6 +382,27 @@ def render_wiki(locations, characters, events, organizations, items, people,
     function is the seam the eventual whole-pipeline entry point (main.py) plugs
     into -- it takes the six typed lists explicitly.
     """
+    # Canonicalize name casing for display BEFORE anything reads `.name`/aliases. We rebuild
+    # each entity + event with a Title-Cased name AND Title-Cased alias texts, so the heading,
+    # the alias display, and the (case-sensitive) cross-link surface pool are all built from the
+    # SAME canonical strings and stay in sync -- normalizing only the heading would desync it
+    # from the pool and stop the name linking. Anchors are unaffected (slugify lowercases);
+    # model_copy leaves the caller's originals untouched.
+    def _cased(seq):
+        out = []
+        for e in seq:
+            aliases = [a.model_copy(update={"text": _normalize_display_name(a.text)})
+                       for a in e.aliases]
+            out.append(e.model_copy(update={
+                "name": _normalize_display_name(e.name), "aliases": aliases}))
+        return out
+    locations = _cased(locations)
+    characters = _cased(characters)
+    events = _cased(events)
+    organizations = _cased(organizations)
+    items = _cased(items)
+    people = _cased(people)
+
     # Drop truly-empty entities BEFORE building the cross-link map. An entity with no
     # renderable body (no prose, no details) AND no supporting quotes has nothing to
     # show -- it would render as a bare heading (or a lone footnote-less stub). This is

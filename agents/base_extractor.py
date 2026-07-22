@@ -187,6 +187,19 @@ class BaseExtractor(BaseAgent):
                 len(batch), exc,
             )
             return []                                  # contained failure: lose one batch, not the run
+        except Exception as exc:
+            # ANY other failure from the call/parse is still just THIS batch failing -- a raw
+            # json.JSONDecodeError (a *sibling* of ClaudeJSONError, so not caught above), a
+            # RecursionError out of json_repair, or a provider/adapter error (APIError, or an
+            # IndexError on a malformed `choices` list from the OpenAI-compat backend). Honor
+            # the "never raises" contract in the docstring: contain it here so one bad batch
+            # loses ~batch_size messages, never the whole extractor section (which is what the
+            # orchestrator's broad per-type except would otherwise drop).
+            logger.error(
+                "Extractor batch failed unexpectedly (%s); skipping %d message(s). %s",
+                type(exc).__name__, len(batch), exc,
+            )
+            return []
         if not isinstance(response, list):
             logger.warning(
                 "Extractor expected a JSON array but got %s; skipping this batch.",
@@ -210,16 +223,34 @@ class BaseExtractor(BaseAgent):
             if not isinstance(raw, dict):
                 logger.warning("Extractor response entry is not an object, ignoring: %r", raw)
                 continue
-            entry = self._build_entry(raw, batch)      # subclass seam
+            try:
+                entry = self._build_entry(raw, batch)      # subclass seam
+            except Exception as exc:
+                # A surprise raise in the subclass seam drops just THIS entry, not the batch
+                # (bad entry -> skipped, per the error philosophy). _build_entry already catches
+                # ValidationError internally; this guards anything it doesn't, keeping the sibling
+                # entries in the batch.
+                logger.warning(
+                    "Extractor entry build failed (%s); skipping this entry: %r",
+                    type(exc).__name__, raw,
+                )
+                continue
             if entry is not None:
                 built.append(entry)
         return built
 
-    def _resolve_quote(self, quote_text, source_id, batch: list[Message]) -> Optional[Quote]:
+    def _resolve_quote(self, quote_text, source_id, batch: list[Message],
+                       detail_text=None) -> Optional[Quote]:
         """Turn Claude's ``(quote_text, source_id)`` into a :class:`Quote` whose
         speaker/source come from the CITED message -- or, when the cited id is off,
         from wherever the quote actually is in this (file-pure) batch. Returns
         ``None`` (logged) only when the quote is verbatim NOWHERE in the batch.
+
+        ``detail_text`` (the FACT the quote is supposed to support) is optional and
+        used only to make the drop/recovery warnings diagnosable: it's shown next to
+        the quote so a human reading the log can judge whether the quote actually
+        backed the claim. Callers with no per-detail fact (the History extractor's
+        flat quote list) pass ``None`` and the logs just omit it.
 
         **Why a whole-batch fallback.** Once the punctuation folding is right, a
         quote copied faithfully from its cited message ALWAYS passes -- the payload
@@ -238,9 +269,14 @@ class BaseExtractor(BaseAgent):
 
         Logs the specific reason so a subclass's ``_build_entry`` doesn't re-log.
         """
+        # Append the claimed fact (when we have one) to the diagnostic logs so a human
+        # can see the quote AND the detail it's meant to support side by side. Empty
+        # when None -> those logs read exactly as before.
+        detail_suffix = f" | detail: {detail_text!r}" if detail_text else ""
         if not isinstance(quote_text, str):
             logger.warning(
-                "Detail cites a non-string quote %r; dropping this detail.", quote_text
+                "Detail cites a non-string quote %r; dropping this detail.%s",
+                quote_text, detail_suffix,
             )
             return None
         # A MALFORMED id (wrong type, or out of range) stays an immediate drop: it's
@@ -251,14 +287,15 @@ class BaseExtractor(BaseAgent):
         # a well-formed, in-range id whose message merely doesn't hold the quote.
         if type(source_id) is not int:
             logger.warning(
-                "Detail cites a non-integer source_id %r; dropping this detail.", source_id
+                "Detail cites a non-integer source_id %r; dropping this detail.%s",
+                source_id, detail_suffix,
             )
             return None
         if not (0 <= source_id < len(batch)):
             logger.warning(
                 "Detail cites source_id %d out of range for this batch of %d; "
-                "dropping this detail.",
-                source_id, len(batch),
+                "dropping this detail.%s",
+                source_id, len(batch), detail_suffix,
             )
             return None
 
@@ -279,8 +316,8 @@ class BaseExtractor(BaseAgent):
         if not matches:
             logger.warning(
                 "Quote not found verbatim in its cited message id %r NOR anywhere in "
-                "its batch; dropping this detail. Claimed quote: %r",
-                source_id, quote_text,
+                "its batch; dropping this detail. Claimed quote: %r%s",
+                source_id, quote_text, detail_suffix,
             )
             return None
         if len(matches) > 1:
@@ -290,14 +327,14 @@ class BaseExtractor(BaseAgent):
             logger.warning(
                 "Quote cited to id %r was found verbatim in %d batch messages (not the "
                 "cited one); recovering the fact with the first match -- speaker may be "
-                "ambiguous. Quote: %r",
-                source_id, len(matches), quote_text,
+                "ambiguous. Quote: %r%s",
+                source_id, len(matches), quote_text, detail_suffix,
             )
         else:
             logger.info(
                 "Quote cited to the wrong id %r recovered from its true message in-batch "
-                "(same file, so provenance is safe). Quote: %r",
-                source_id, quote_text,
+                "(same file, so provenance is safe). Quote: %r%s",
+                source_id, quote_text, detail_suffix,
             )
         found = matches[0]
         return Quote(text=quote_text, speaker=found.sender, source_file=found.source_file)

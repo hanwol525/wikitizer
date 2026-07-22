@@ -50,6 +50,7 @@ Include any people or culture that the messages name or clearly describe as a di
 Boundaries with the other extractors — this one is easy to confuse, so read carefully:
 - A single INDIVIDUAL is NOT a people or culture — that is a character. "Kriggy", one member of the Krieg, is a character; "the Krieg" as a whole people belongs here. One direwolf named in a fight is a character; "direwolves" as a kind of creature belongs here.
 - A formal, structured BODY is NOT a people or culture — that is an organization. A culture is "who these people are"; an organization is "a structured group they formed" (a guild, a government, a church). "the Krieg" as a people belongs here; "the Krieger Imperium", their state, is an organization.
+- A group defined by a shared PROFESSION, TRADE, ROLE, or FUNCTION — not by ancestry — is NOT a people or culture. An academic, magical, or military CORPS or ORDER — "the War Mages", "the Research Mages", "the Archmages", "the city guard", "the royal cartographers" — is an ORGANIZATION (or, if truly a single person, a character), never a people. A collective label ending in a role or trade (-mage, -mages, -smith, -guard, -knight, -warden, -wright, -sworn) names a JOB, not an ancestry, so it is an ORGANIZATION even when its members share magical training. A people or culture is defined by shared ANCESTRY, ETHNICITY, SPECIES, NATIONALITY, or cultural heritage — not by a job. When you are unsure whether a group is a people or an organization, and it has any leadership, military, government, training body, or formal structure, treat it as an ORGANIZATION and leave it out of here — a duplicate page split across two types is worse than one well-placed page.
 - A PLACE is NOT a people or culture — that is a location. A country, nation, region, city, or realm is a place, captured by the locations extractor (its geography, territory, capital, where it sits). Only the PEOPLE of such a place — its inhabitants taken as a distinct group ("the people of Gol", "the Krieg") — belong here; the place itself does not. If the messages describe only a place (where it sits, its capital, its borders) and never describe its inhabitants as a distinct people, do NOT extract it here at all — leave the place to the locations extractor.
 
 For each people or culture, extract:
@@ -125,7 +126,8 @@ class PeopleAndCulturesExtractor(BaseExtractor):
             if not isinstance(detail_text, str) or not isinstance(quote_text, str):
                 logger.warning("People/culture detail missing a string 'detail'/'quote', ignoring: %r", d)
                 continue
-            q = self._resolve_quote(quote_text, d.get("source_id"), batch)
+            q = self._resolve_quote(quote_text, d.get("source_id"), batch,
+                                    detail_text=detail_text)
             if q is None:                       # _resolve_quote already logged why
                 continue
             details_out.append(Detail(text=detail_text, source_files=[q.source_file]))

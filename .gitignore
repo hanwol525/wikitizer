@@ -227,7 +227,10 @@ __marimo__/
 tests/fixtures/real_messages.py
 tests/output/
 phase-3.10-test-messages.md
+# All speaker maps hold real names (PII): the legacy phone-keyed one and any
+# name-keyed variant like speaker_map.imessage.json.
 config/speaker_map.json
+config/speaker_map*.json
 config/player_map.json
 
 # Phase 4.5 orchestrator output: a real-log wiki embeds verbatim quotes and real

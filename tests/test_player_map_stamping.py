@@ -82,12 +82,16 @@ def test_map_matches_by_alias():
     assert c.player_name == "Sam" and c.is_pc is True
 
 
-def test_unlisted_character_keeps_llm_guess():
+def test_unlisted_character_drops_llm_guess_when_map_present():
+    # Config-authoritative: when a player_map IS configured, an UNDECLARED character does
+    # NOT keep the LLM's player_name guess. A plausible-but-wrong guess surviving here
+    # (a narrator name on a character they didn't declare) fabricates a player_name clash
+    # that vetoes a legitimate merge downstream and splits one character into two pages.
     resp = [{"name": "Tiberius", "aliases": [], "is_pc": True, "player_name": "Sam",
              "details": [{"detail": "x", "quote": "Tiberius rules", "source_id": 0}]}]
     c = one(resp, {"Sam"}, [msg("Tiberius rules")], player_map={"Sam": ["Kriggy"]})
-    assert c.player_name == "Sam"        # unchanged -- Tiberius isn't in the map
-    assert c.is_pc is True               # (its own LLM value, not forced by the map)
+    assert c.player_name is None         # dropped -- Tiberius isn't in the map; config wins
+    assert c.is_pc is True               # is_pc left as the LLM's value; only player_name is dropped
 
 
 def test_no_map_leaves_llm_guess_untouched():

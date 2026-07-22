@@ -32,8 +32,9 @@ import os
 from pathlib import Path
 from typing import Optional, Union
 
-import anthropic
 from json_repair import repair_json
+
+from agents.llm_client import DEFAULT_BIG_MODEL, build_llm_client
 
 logger = logging.getLogger(__name__)
 
@@ -127,18 +128,20 @@ class BaseAgent:
     def __init__(
         self,
         client=None,
-        model: str = "claude-sonnet-4-6",
+        model: str = DEFAULT_BIG_MODEL,
         temperature: float = 0.2,
         max_tokens: int = 4096,
         max_json_retries: int = 3,
         cache: Optional[bool] = None,
         cache_dir: str = ".llm_cache",
     ):
-        # Injected client wins; otherwise build a real one. ``max_retries=3``
-        # lets the SDK transparently retry transient HTTP failures (timeouts,
-        # 429s, 5xx) with backoff. The key comes from ANTHROPIC_API_KEY via the
-        # SDK -- never read or stored here.
-        self.client = client if client is not None else anthropic.Anthropic(max_retries=3)
+        # Injected client wins; otherwise build the default (Anthropic) client. The
+        # orchestrator normally injects a per-role client (Anthropic or an
+        # OpenAI-compatible wrapper) via build_llm_client; this fallback covers direct
+        # instantiation. ``max_retries=3`` (set inside build_llm_client) lets the SDK
+        # transparently retry transient HTTP failures. Keys come from the environment
+        # via the SDK -- never read or stored here.
+        self.client = client if client is not None else build_llm_client("anthropic")
         self.model = model
         self.temperature = temperature
         self.max_tokens = max_tokens

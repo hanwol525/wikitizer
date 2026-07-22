@@ -87,15 +87,14 @@ def build_character_lookup(player_map: dict) -> dict:
     return lookup
 
 
-def declared_groups(player_map: dict) -> list:
-    """The character-identity groups for the reconciler's declared-merge floor: one
-    normalized, ORDER-PRESERVING name-list per player key that lists at least one name.
-    Each group's names are aliases of ONE character (the user's declaration), so the
-    reconciler merges any entries whose name/alias falls in the same group. Order is
-    kept (first-listed wins) so the merge can prefer the user's first name as the
-    heading; membership is order-independent (the caller sets-ifies for lookup)."""
-    groups = []
-    for names in player_map.values():
+def declared_groups_with_players(player_map: dict) -> list:
+    """Like :func:`declared_groups`, but pairs each group with the (lowercased) PLAYER who
+    owns it: ``[(player_lower, [name_lower, ...]), ...]`` for every player listing >= 1 name,
+    in player_map order. The owning player key lets the reconciler fold a character
+    mis-named after the player -- the player minted as their own PC -- into that player's
+    declared character. Same normalization/order as :func:`declared_groups`."""
+    out = []
+    for player, names in player_map.items():
         seen = set()
         ordered = []
         for n in _coerce_names(names):
@@ -104,5 +103,15 @@ def declared_groups(player_map: dict) -> list:
                 seen.add(key)
                 ordered.append(key)
         if ordered:
-            groups.append(ordered)
-    return groups
+            out.append((player.strip().lower(), ordered))
+    return out
+
+
+def declared_groups(player_map: dict) -> list:
+    """The character-identity groups for the reconciler's declared-merge floor: one
+    normalized, ORDER-PRESERVING name-list per player key that lists at least one name.
+    Each group's names are aliases of ONE character (the user's declaration), so the
+    reconciler merges any entries whose name/alias falls in the same group. Order is
+    kept (first-listed wins) so the merge can prefer the user's first name as the
+    heading; membership is order-independent (the caller sets-ifies for lookup)."""
+    return [names for _, names in declared_groups_with_players(player_map)]

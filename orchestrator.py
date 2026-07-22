@@ -14,10 +14,9 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Optional
 
-import anthropic
-
+from agents.llm_client import LLMBackendResolver
 from models.message import Message
-from parsers.chat_parser import parse_chat_log
+from parsers.ingest import parse_messages
 from parsers.reaction_filter import filter_reactions
 from agents.noise_filter import NoiseFilterAgent, select_for_extraction
 from agents.locations_extractor import LocationsExtractor
@@ -144,6 +143,11 @@ class PipelineConfig:
     # guess. When set, it authoritatively assigns player_name and merges the names
     # grouped under one player as a single character.
     player_map: dict = field(default_factory=dict)
+    # Which chat-log format the input files are in: "auto" (sniff each file),
+    # "imessage" (a structured imessage-exporter TXT export), or "legacy" (the
+    # copy-pasted iMessage .txt). "auto" is right for almost everyone; the two
+    # formats are trivially distinguishable (see parsers/ingest.detect_format).
+    input_format: str = "auto"
 
 
 @dataclass
@@ -165,17 +169,19 @@ class WikiOutput:
 class Orchestrator:
     """Runs the whole ingest-to-wiki pipeline. Build once, call run().
 
-    `client` is the single shared Anthropic client, injected so tests can pass a
-    fake and never hit the network. In production it's None and we build one real
-    client (with the SDK's own 3x transient-HTTP retry) that every agent shares.
+    `client`, when injected (tests pass a fake), is used for EVERY agent, so nothing
+    hits the network. In production it's None and each agent's backend is resolved per
+    role from env (`LLMBackendResolver`): unset -> the current Anthropic models on one
+    shared Anthropic client; a `WIKITIZER_<ROLE>_MODEL` with an `openrouter:`/`openai:`
+    prefix routes that role to an OpenAI-compatible endpoint (e.g. GLM-5.2) instead.
     """
 
     def __init__(self, client=None, cache=False):
-        # Injected client wins (tests pass a fake); else build ONE real shared
-        # client. max_retries=3 is the SDK's transient-HTTP retry, set once for the
-        # whole run. The API key is read by the SDK from the environment (main.py's
-        # load_dotenv put it there) -- we never read or store the key here.
-        self.client = client if client is not None else anthropic.Anthropic(max_retries=3)
+        # Kept as the injected override (a fake in tests, or None in production). The
+        # resolver uses it for every role when set, so one injected client still wires
+        # all agents; when None, the resolver builds real per-provider clients on demand.
+        self.client = client
+        self._resolver = LLMBackendResolver(override_client=client)
         # Turn on the agents' dev disk cache (main.py's --cache flag). It lives in
         # call_claude_json, so it skips identical extractor + noise-filter calls on a
         # re-run of the same logs -- the big saver while debugging. The reconciler /
@@ -183,38 +189,50 @@ class Orchestrator:
         self.cache = cache
 
     def _build_agents(self, config: PipelineConfig):
-        """Construct every agent, all sharing self.client. Its own method so a test
-        can subclass and swap in stub agents to exercise sequencing/error-handling
+        """Construct every agent, its backend resolved PER ROLE. Its own method so a
+        test can subclass and swap in stub agents to exercise sequencing/error-handling
         without any real Claude calls.
 
-        Only the model varies between agents, and that's set INSIDE each agent (the
-        noise filter self-selects Haiku; the extractors/reconciler keep BaseAgent's
-        Sonnet default) -- so here we only pass the shared client.
+        Each role -> `(client, model)` via `self._resolver.resolve(ROLE)`. With no env
+        set (or an injected fake), every role gets the same client + its current
+        Anthropic model, so behaviour is unchanged; a `WIKITIZER_<ROLE>_MODEL` with an
+        `openrouter:`/`openai:` prefix routes just that role to a cheaper model.
         """
         # `cache=self.cache` flows to BaseAgent via **kwargs and turns on the disk
         # cache when --cache is set (default off -> unchanged behaviour).
-        noise_filter = NoiseFilterAgent(client=self.client, cache=self.cache)
-        # The characters extractor needs the real player names so table-talk about a
-        # real person ("Sam, you free Thursday?") isn't minted as a character. The
-        # roster is the speaker map's VALUES (every real person, incl. the exporter).
+        noise_client, noise_model = self._resolver.resolve("NOISE")
+        # max_workers fans the noise batches out over a thread pool (this is the
+        # highest-volume, otherwise-sequential stage). It reuses the extractor cap --
+        # the noise filter runs before extraction, so the two never overlap.
+        noise_filter = NoiseFilterAgent(client=noise_client, model=noise_model,
+                                        max_workers=config.max_workers, cache=self.cache)
+        # The six extractors share one role/backend (EXTRACT). The characters extractor
+        # additionally needs the real player names so table-talk about a real person
+        # ("Sam, you free Thursday?") isn't minted as a character -- the roster is the
+        # speaker map's VALUES (every real person, incl. the exporter).
+        ex_client, ex_model = self._resolver.resolve("EXTRACT")
         extractors = {
-            "locations": LocationsExtractor(client=self.client, cache=self.cache),
+            "locations": LocationsExtractor(client=ex_client, model=ex_model, cache=self.cache),
             "characters": CharactersExtractor(
-                client=self.client,
+                client=ex_client,
+                model=ex_model,
                 player_names=list(config.speaker_map.values()),
                 player_map=config.player_map,
                 cache=self.cache,
             ),
-            "history": HistoryExtractor(client=self.client, cache=self.cache),
-            "organizations": OrganizationExtractor(client=self.client, cache=self.cache),
-            "items": ItemExtractor(client=self.client, cache=self.cache),
-            "people": PeopleAndCulturesExtractor(client=self.client, cache=self.cache),
+            "history": HistoryExtractor(client=ex_client, model=ex_model, cache=self.cache),
+            "organizations": OrganizationExtractor(client=ex_client, model=ex_model, cache=self.cache),
+            "items": ItemExtractor(client=ex_client, model=ex_model, cache=self.cache),
+            "people": PeopleAndCulturesExtractor(client=ex_client, model=ex_model, cache=self.cache),
         }
         # The reconciler needs the declared party too, for the deterministic
         # declared-merge floor (names grouped under one player -> one character).
-        reconciler = Reconciler(client=self.client, cache=self.cache, player_map=config.player_map)
+        rec_client, rec_model = self._resolver.resolve("RECONCILE")
+        reconciler = Reconciler(client=rec_client, model=rec_model, cache=self.cache,
+                                player_map=config.player_map)
         # The prose agent runs AFTER reconcile/carve to polish bodies + descriptions.
-        prose_agent = ProseAgent(client=self.client, cache=self.cache)
+        pr_client, pr_model = self._resolver.resolve("PROSE")
+        prose_agent = ProseAgent(client=pr_client, model=pr_model, cache=self.cache)
         return noise_filter, extractors, reconciler, prose_agent
 
     def run(self, files, config: PipelineConfig, exclude_sources=None) -> "WikiOutput":
@@ -242,7 +260,7 @@ class Orchestrator:
         # every Message, so concatenating loses no provenance (4.6 exclusion needs it).
         all_messages: list[Message] = []
         for filepath in files:
-            parsed = parse_chat_log(filepath, config.speaker_map)
+            parsed = parse_messages(filepath, config.speaker_map, config.input_format)
             all_messages.extend(filter_reactions(parsed))
 
         if not all_messages:
@@ -293,16 +311,28 @@ class Orchestrator:
         # the reconciler itself already takes on a JSON failure), and a failed
         # order_history leaves the events unordered so they render under "Could Not
         # Place" (exactly what _weave_and_stamp already produces internally).
+        #
+        # The per-type reconciles are independent (each is one global LLM call over one
+        # type's list; the reconciler holds no per-call mutable state), so they fan out
+        # over the same thread pool as the extractors -- a wall-clock win, identical
+        # results. This stage runs AFTER the extractor fan-out, so its concurrency does
+        # not stack on it; order_history still runs after, since it needs the merged
+        # history list. Log LINES may interleave, but each already names its type.
         reconciled: dict[str, list] = {}
-        for lore_type, entries in extracted.items():
-            try:
-                reconciled[lore_type] = reconciler.reconcile(entries)
-            except Exception as exc:
-                logger.error(
-                    "%s %s reconcile failed; using un-reconciled entries. %s",
-                    REVIEW_PREFIX, lore_type, exc,
-                )
-                reconciled[lore_type] = entries
+        with ThreadPoolExecutor(max_workers=config.max_workers) as pool:
+            futures = {
+                lore_type: (pool.submit(reconciler.reconcile, entries), entries)
+                for lore_type, entries in extracted.items()
+            }
+            for lore_type, (future, entries) in futures.items():
+                try:
+                    reconciled[lore_type] = future.result()
+                except Exception as exc:
+                    logger.error(
+                        "%s %s reconcile failed; using un-reconciled entries. %s",
+                        REVIEW_PREFIX, lore_type, exc,
+                    )
+                    reconciled[lore_type] = entries
 
         events = reconciled["history"]
         try:

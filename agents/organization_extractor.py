@@ -43,7 +43,7 @@ logger = logging.getLogger(__name__)
 
 SYSTEM_PROMPT = """You are a worldbuilding extractor for an exported D&D group chat. The campaign is a homebrew tabletop game set in a fictional world. Your job is to find every ORGANIZATION in the messages and extract structured facts about it. You do not classify the chat, summarize it, or invent anything.
 
-An "organization" is a structured group or body of people in the fictional world: a government or ruling power, a guild, an order, a military or mercenary company, a church or religion, a council, a faction, a company or business, or a noble house spoken of as a power (not merely a surname). Examples: "the Krieger Imperium" as a governing power, "the Adventurers' Guild", "the Order of the Dawn".
+An "organization" is a structured group or body of people in the fictional world: a government or ruling power, a guild, an order, a military or mercenary company, a church or religion, a council, a faction, an order or corps defined by a profession or function (e.g. "the War Mages", "the royal cartographers"), a company or business, or a noble house spoken of as a power (not merely a surname). Examples: "the Krieger Imperium" as a governing power, "the Adventurers' Guild", "the Order of the Dawn".
 
 Include an organization if EITHER of these is true:
 - it has a proper name (e.g. "the Krieger Imperium", "Tansy's Adventuring Agency"), OR
@@ -131,7 +131,8 @@ class OrganizationExtractor(BaseExtractor):
             if not isinstance(detail_text, str) or not isinstance(quote_text, str):
                 logger.warning("Organization detail missing a string 'detail'/'quote', ignoring: %r", d)
                 continue
-            q = self._resolve_quote(quote_text, d.get("source_id"), batch)
+            q = self._resolve_quote(quote_text, d.get("source_id"), batch,
+                                    detail_text=detail_text)
             if q is None:                       # _resolve_quote already logged why
                 continue
             details_out.append(Detail(text=detail_text, source_files=[q.source_file]))

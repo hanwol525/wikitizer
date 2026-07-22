@@ -71,12 +71,13 @@ For each detail, provide three things:
 - quote: the EXACT, VERBATIM text from the message that supports this detail. Copy it character-for-character. Do NOT paraphrase, shorten, fix typos, or change punctuation. It must appear word-for-word in the message. If the copied text contains quotation marks, keep them EXACTLY as they appear — leave curly “ ” marks curly, do not straighten them — because an unescaped straight quote inside a JSON value breaks the whole batch.
 - source_id: the integer id of the message you took the quote from.
 
-Keep flavor, drop mechanics. KEEP backstory, personality, relationships, titles, and role in the world. IGNORE game mechanics entirely: character class, subclass, feats, level, ability scores, armor class (AC), hit points, dice, and build choices are NOT character facts. A single message can mix both — keep only the flavor part. Example: from "Kriggy's the disgraced son of a noble house, Battlemaster with 18 AC", extract "the disgraced son of a noble house" and ignore the Battlemaster/AC part. When you quote, quote only the flavor span, not the mechanics.
+Keep flavor, drop mechanics. KEEP backstory, personality, relationships, titles, role in the world, and a character's RACE or SPECIES (warforged, elf, dwarf, half-orc, and the like) — a character's race is WHO THEY ARE in the world, a kept identity fact, NOT a mechanic. IGNORE game-mechanics build details: character class, subclass, feats, level, ability scores, armor class (AC), hit points, dice, and build choices are NOT character facts. A single message can mix both — keep only the flavor part. Example: from "Kriggy's the disgraced son of a noble house, Battlemaster with 18 AC", extract "the disgraced son of a noble house" and ignore the Battlemaster/AC part. When you quote, quote only the flavor span, not the mechanics.
 
 Hard rules:
 - Do NOT invent characters, details, or quotes. Every detail must be supported by a real quote from a real message.
 - Do NOT paraphrase quotes. The "detail" is yours to phrase; the "quote" must be copied exactly. Each quote is automatically checked against the message you cite in source_id; if it cannot be found there word-for-word, that detail is thrown away — so copy carefully and cite the right id.
 - Only use facts actually stated in the messages. If something is implied but not stated, leave it out.
+- Attach each detail ONLY to the character it is explicitly about. Do NOT transfer a fact, relationship, or trait from one character to another, and do NOT infer a relationship that was not stated. When a message states a relationship (e.g. "X is Y's uncle"), record it only for the character who is its stated subject and keep the direction exactly as stated — do not flip it or reassign it to a different character.
 - A character can be mentioned across several messages; pull details (and any aliases) from wherever they appear. Do not try to merge duplicate characters or unify their names across separate mentions beyond choosing a reasonable canonical name and the aliases a message clearly gives — the rest of the merging is handled later.
 - If a character is named but no facts are stated, you may still include them with an empty details list.
 
@@ -214,6 +215,21 @@ class CharactersExtractor(BaseExtractor):
                 )
             player_name = declared_player
             is_pc = True
+        elif self._character_to_player:
+            # A player_map IS configured but this character is UNDECLARED: the config is
+            # the sole source of truth for who plays whom, so we do NOT keep the LLM's
+            # player_name guess. A plausible narrator name surviving here (e.g. "Conrad"
+            # on "Kriggy Krieger") fabricates a player_name clash that vetoes a legitimate
+            # merge downstream and splits one character into two pages. Dropping it lets
+            # the reconciler merge cleanly (the declared fragment carries the real player).
+            # When NO player_map is configured, we skip this branch and keep the legacy
+            # roster-validated guess (the offline/synthetic path).
+            if player_name is not None:
+                logger.info(
+                    "Character %r is not in the declared player_map; dropping the LLM's "
+                    "player_name guess %r (config is authoritative).", name, player_name,
+                )
+            player_name = None
 
         # detail/quote loop -- same shape as LocationsExtractor._build_entry.
         raw_details = raw.get("details", [])
@@ -237,7 +253,8 @@ class CharactersExtractor(BaseExtractor):
                     "Character detail missing a string 'detail'/'quote', ignoring: %r", d
                 )
                 continue
-            q = self._resolve_quote(quote_text, d.get("source_id"), batch)
+            q = self._resolve_quote(quote_text, d.get("source_id"), batch,
+                                    detail_text=detail_text)
             if q is None:
                 # _resolve_quote already logged the specific reason; drop the detail.
                 continue

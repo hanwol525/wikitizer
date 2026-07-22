@@ -74,6 +74,37 @@ _SENTENCE_PUNCT = ".!?;:"
 # lookarounds against this class instead of trusting ``\b``.
 _NAME_CHARS = r"\w'’\-"
 
+# --- Case-insensitive matching for PROPER-NOUN surfaces (bucket F). --- #
+# Prose sometimes carries a chat-caps spelling ("DOBROVIC is the capital of Eglon")
+# that strict case-sensitive matching neither links nor re-cases. We allow a surface
+# to match case-INSENSITIVELY only when it is "case-safe" -- distinctive enough that
+# a case-fold can't collide with ordinary prose -- and, at match time, only when the
+# matched prose is not entirely lowercase (so an ALL-CAPS / Title / Mixed mention
+# links and re-cases to canonical, while an all-lowercase common word never fires).
+# A single-word surface must be at least this long to be eligible at all.
+_CI_MIN_WORD_LEN = 4
+
+# Common English words that double as plausible single-word entity names ("Will",
+# "Order", "Empire"). A single-word surface in this set stays CASE-SENSITIVE, so
+# case-insensitive matching can never fire it on ordinary lowercase/all-caps prose.
+# Over-inclusion is the safe direction (it just keeps a word at today's exact-match
+# behavior); a distinctive fantasy name ("Dobrovic", "Maltraav") is absent, so it
+# earns the case-insensitive upgrade.
+_COMMON_WORDS = frozenset("""
+will well would should could might must have been were does done this that these those
+then than they them their there here what when where which while your into from with about
+after before between among around other some such only same once ever even also just very
+more most much many each both either none king kings queen lord lords lady house court order
+orders guard guards city cities town towns keep castle temple church clan clans tribe tribes
+family war wars battle crown throne gate gates hall halls tower towers bridge road roads river
+rivers lake lakes mount mountain forest forests wood woods seas island islands isle north
+south east west land lands world worlds empire kingdom realm realms council army navy guild
+guilds blade sword shield spear staff wand ring gold silver iron stone fire water earth wind
+storm light dark shadow blood bone death life love hope faith grace song songs strong young
+elder great high first last march april june august mark page rose hunter victor born reign
+oath moon star stars light night nights days year years ages time wizard
+""".split())
+
 
 # --------------------------------------------------------------------------- #
 # Pure helpers (no I/O, no state) -- each unit-tests on its own.
@@ -162,10 +193,35 @@ def _looks_sentence_ish(surface: str) -> bool:
     return len(surface.split()) > _MAX_SOURCE_WORDS
 
 
-def _compile_pattern(surfaces: list) -> Optional["re.Pattern"]:
+def _is_case_safe(surface: str) -> bool:
+    """Whether a pool surface may be matched CASE-INSENSITIVELY (bucket F). Multi-word
+    surfaces are always safe -- a whole phrase almost never collides with ordinary
+    prose. A single-word surface is safe only when it is distinctive: at least
+    `_CI_MIN_WORD_LEN` chars, has a letter, and is not a common English word (so an
+    entity 'Will'/'Order'/'Empire' stays case-sensitive and never fires on ordinary
+    prose). The match handler adds a second guard -- an all-lowercase mention never
+    fires a case-insensitive match -- so this only opens the door for a CAPITALIZED or
+    ALL-CAPS mention to link and re-case to canonical."""
+    stripped = surface.strip()
+    if not stripped:
+        return False
+    if any(ch.isspace() for ch in stripped):
+        return True
+    if len(stripped) < _CI_MIN_WORD_LEN or not any(c.isalpha() for c in stripped):
+        return False
+    return stripped.casefold() not in _COMMON_WORDS
+
+
+def _compile_pattern(surfaces: list, case_safe: Optional[set] = None) -> Optional["re.Pattern"]:
     """Compile ONE regex whose alternatives are the pool's surface forms, ordered
     LONGEST first, with self-defined word boundaries and an optional leading
     article. Returns None for an empty pool.
+
+    A surface in `case_safe` is wrapped in a scoped inline ``(?i:...)`` flag so it
+    matches case-INSENSITIVELY (catching an ALL-CAPS / mixed-case mention); every
+    other surface stays case-sensitive. Scoped flags keep this ONE regex + one
+    ``finditer`` pass (so re-linking our own output is still impossible) rather than
+    two passes that could double-link.
 
     Why one regex + ``re.finditer`` (the load-bearing choice): finditer walks
     left-to-right in reading order and returns NON-overlapping matches, so a span
@@ -189,10 +245,13 @@ def _compile_pattern(surfaces: list) -> Optional["re.Pattern"]:
     """
     if not surfaces:
         return None
+    case_safe = case_safe or set()
     # Re-sort defensively so the alternation is longest-first regardless of how the
     # caller ordered `surfaces`; ties break alphabetically for a byte-stable regex.
     ordered = sorted(surfaces, key=lambda s: (-len(s), s))
-    alternation = "|".join(re.escape(s) for s in ordered)
+    alternation = "|".join(
+        rf"(?i:{re.escape(s)})" if s in case_safe else re.escape(s) for s in ordered
+    )
     the_part = rf"(?P<the>(?<![{_NAME_CHARS}])(?:[Tt]he)\s+)?"
     name_part = rf"(?<![{_NAME_CHARS}])(?P<name>{alternation})(?![{_NAME_CHARS}])"
     return re.compile(the_part + name_part)
@@ -233,6 +292,12 @@ class CrosslinkMap:
     sources: list
     pattern: Optional["re.Pattern"]
     _lookup: dict = field(default_factory=dict)
+    # casefold(surface) -> canonical surface, for the case-safe surfaces only (bucket
+    # F). The walk uses it to resolve a case-variant prose mention ("DOBROVIC") back to
+    # the pool's canonical surface ("Dobrovic") so the emitted link text is re-cased.
+    # Built only for unambiguous casefolds -- if two distinct surfaces share a casefold
+    # they stay exact-only (see build_crosslink_map).
+    _ci_lookup: dict = field(default_factory=dict)
     # parallel to the `events` passed to build_crosslink_map: event_anchors[i] is
     # event i's anchor, or None where the event earned none (a sentence-shaped name
     # that was gated out). The renderer zips this with the events to stamp anchors,
@@ -468,7 +533,27 @@ def build_crosslink_map(noun_entities: list, events: Optional[list] = None, comm
     # be longer than some other entity's whole name, so they must be sorted
     # together, not "all names then all aliases".
     sources.sort(key=lambda pair: (-len(pair[0]), pair[0]))
-    pattern = _compile_pattern([s for s, _ in sources])
+
+    # Decide which surfaces may match case-insensitively (bucket F). Group case-safe
+    # candidates by casefold: a casefold shared by two DISTINCT surfaces is ambiguous
+    # (which canonical casing would we re-case to?), so demote all of them to
+    # exact-only -- the same "can't pick -> don't" posture as the ambiguity drop above.
+    by_fold = {}
+    for s, _ in sources:
+        if _is_case_safe(s):
+            by_fold.setdefault(s.casefold(), []).append(s)
+    case_safe = set()
+    ci_lookup = {}
+    for fold, surfs in by_fold.items():
+        if len(surfs) == 1:
+            case_safe.add(surfs[0])
+            ci_lookup[fold] = surfs[0]
+        else:
+            logger.warning("%s crosslink: surfaces %s share a case-fold; keeping them "
+                           "case-sensitive (no case-insensitive match).",
+                           REVIEW_PREFIX, sorted(surfs))
+
+    pattern = _compile_pattern([s for s, _ in sources], case_safe)
 
     return CrosslinkMap(
         anchors=anchors,
@@ -476,6 +561,7 @@ def build_crosslink_map(noun_entities: list, events: Optional[list] = None, comm
         sources=sources,
         pattern=pattern,
         _lookup=lookup,
+        _ci_lookup=ci_lookup,
         event_anchors=event_anchors,
     )
 
@@ -530,7 +616,22 @@ def _weave(segment: str, crosslink_map: CrosslinkMap, seen: set) -> str:
         out.append(segment[last:m.start()])
         name = m.group("name")
         the = m.group("the") or ""          # "" when no article precedes
-        anchor, article_required = crosslink_map._lookup[name]
+        entry = crosslink_map._lookup.get(name)
+        if entry is not None:
+            canonical = name                # exact-case match: prose already canonical
+        else:
+            # A case-INSENSITIVE (case-variant) match on a case-safe surface. Resolve
+            # it to the pool's canonical surface, but link ONLY when the matched prose
+            # isn't all-lowercase -- so an ALL-CAPS / Title / Mixed mention re-cases and
+            # links ("DOBROVIC" -> "[Dobrovic]"), while ordinary lowercase prose (a
+            # common word that slipped the stoplist) stays plain, the safe direction.
+            canonical = crosslink_map._ci_lookup.get(name.casefold())
+            if canonical is None or name.islower():
+                out.append(m.group(0))
+                last = m.end()
+                continue
+            entry = crosslink_map._lookup[canonical]
+        anchor, article_required = entry
         if article_required and not m.group("the"):
             # A common-word surface (e.g. "Founding") fires only with a leading
             # "the". No article here -> this is sentence-prose like "Founding
@@ -542,8 +643,9 @@ def _weave(segment: str, crosslink_map: CrosslinkMap, seen: set) -> str:
             out.append(m.group(0))
         else:
             seen.add(anchor)
-            # "the" is ALWAYS rendered outside the brackets with its original casing.
-            out.append(f"{the}[{name}](#{anchor})")
+            # Emit the CANONICAL surface (re-cased to the entity's own casing); "the"
+            # is ALWAYS rendered outside the brackets with its original casing.
+            out.append(f"{the}[{canonical}](#{anchor})")
         last = m.end()
     out.append(segment[last:])
     return "".join(out)

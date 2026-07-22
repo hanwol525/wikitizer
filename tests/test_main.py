@@ -42,6 +42,33 @@ def test_parse_args_exclude_sources_dashes_become_underscores():
     assert args.exclude_sources == ["dm.txt", "solo.txt"]
 
 
+def test_parse_args_input_format_default_is_auto():
+    assert parse_args(["--files", "a.txt"]).input_format == "auto"
+
+
+def test_parse_args_input_format_choice():
+    assert parse_args(["--files", "a.txt", "--input-format", "imessage"]).input_format == "imessage"
+
+
+def test_parse_args_input_format_rejects_unknown():
+    with pytest.raises(SystemExit):      # argparse rejects an off-menu choice (exit 2)
+        parse_args(["--files", "a.txt", "--input-format", "sqlite"])
+
+
+def test_parse_args_config_map_paths_default_to_constants():
+    a = parse_args(["--files", "a.txt"])
+    assert a.speaker_map == main_mod.SPEAKER_MAP_PATH
+    assert a.player_map == main_mod.PLAYER_MAP_PATH
+
+
+def test_parse_args_config_map_paths_override():
+    a = parse_args(["--files", "a.txt",
+                    "--speaker-map", "config/speaker_map.imessage.json",
+                    "--player-map", "config/other_party.json"])
+    assert a.speaker_map == "config/speaker_map.imessage.json"
+    assert a.player_map == "config/other_party.json"
+
+
 def test_parse_args_files_is_required():
     with pytest.raises(SystemExit):      # argparse errors out (exit 2)
         parse_args([])
@@ -98,6 +125,7 @@ def stub_pipeline(monkeypatch):
             def run(self, files, config, exclude_sources=None):
                 calls["files"] = files
                 calls["exclude_sources"] = exclude_sources
+                calls["config"] = config
                 return result
 
         monkeypatch.setattr(main_mod, "Orchestrator", _StubOrchestrator)
@@ -194,3 +222,64 @@ def test_main_does_not_confirm_without_the_flag(tmp_path, stub_pipeline, monkeyp
                         lambda *a, **k: called.__setitem__("save", True))
     main_mod.main(["--files", "logs/a.txt", "--output", str(tmp_path / "wiki.md")])
     assert called["save"] is False   # no --confirm-players -> config left untouched
+
+
+# --- the soft player_map "requirement" (a loud warning, not an abort) -------- #
+def test_main_warns_loudly_when_no_player_map(tmp_path, stub_pipeline, caplog):
+    # The fixture stubs load_player_map -> {} (empty), so the warning must fire.
+    stub_pipeline(WikiOutput(full="FULL"))
+    with caplog.at_level(logging.WARNING):
+        main_mod.main(["--files", "logs/a.txt", "--output", str(tmp_path / "wiki.md")])
+    assert "[REVIEW]" in caplog.text and "No player_map configured" in caplog.text
+    # Non-fatal: the run still completes and writes the wiki.
+    assert (tmp_path / "wiki.md").read_text(encoding="utf-8") == "FULL"
+
+
+def test_main_no_warning_when_player_map_present(tmp_path, stub_pipeline, monkeypatch, caplog):
+    stub_pipeline(WikiOutput(full="FULL"))
+    # Override the fixture's empty-map stub with a populated declared party.
+    monkeypatch.setattr(main_mod, "load_player_map", lambda p: {"Sam": ["Kriggy"]})
+    with caplog.at_level(logging.WARNING):
+        main_mod.main(["--files", "logs/a.txt", "--output", str(tmp_path / "wiki.md")])
+    assert "No player_map configured" not in caplog.text
+
+
+def test_main_threads_input_format_into_config(tmp_path, stub_pipeline):
+    calls = stub_pipeline(WikiOutput(full="FULL"))
+    main_mod.main(["--files", "logs/a.txt", "--output", str(tmp_path / "wiki.md"),
+                   "--input-format", "imessage"])
+    assert calls["config"].input_format == "imessage"
+
+
+def test_main_default_input_format_is_auto(tmp_path, stub_pipeline):
+    calls = stub_pipeline(WikiOutput(full="FULL"))
+    main_mod.main(["--files", "logs/a.txt", "--output", str(tmp_path / "wiki.md")])
+    assert calls["config"].input_format == "auto"
+
+
+def test_main_speaker_map_override_reaches_the_loader(tmp_path, stub_pipeline, monkeypatch):
+    stub_pipeline(WikiOutput(full="FULL"))
+    seen = {}
+
+    def rec(path):
+        seen["path"] = path
+        return {"exporter": "H"}
+
+    monkeypatch.setattr(main_mod, "load_speaker_map", rec)   # overrides the fixture's stub
+    main_mod.main(["--files", "logs/a.txt", "--output", str(tmp_path / "wiki.md"),
+                   "--speaker-map", "config/speaker_map.imessage.json"])
+    assert seen["path"] == "config/speaker_map.imessage.json"
+
+
+def test_main_player_map_override_reaches_the_loader(tmp_path, stub_pipeline, monkeypatch):
+    stub_pipeline(WikiOutput(full="FULL"))
+    seen = {}
+
+    def rec(path):
+        seen["path"] = path
+        return {"Sam": ["Kriggy"]}
+
+    monkeypatch.setattr(main_mod, "load_player_map", rec)
+    main_mod.main(["--files", "logs/a.txt", "--output", str(tmp_path / "wiki.md"),
+                   "--player-map", "config/other_party.json"])
+    assert seen["path"] == "config/other_party.json"
