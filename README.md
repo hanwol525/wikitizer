@@ -1,6 +1,7 @@
 # wikitizer
 Agentic project (Claude Code) to wikify worldbuilding notes. Intended to be a free basic alternative to sites like WorldAnvil.
 Requires an Anthropic API key and/or an OpenRouter API key to run locally.
+This project is currently undergoing end-to-end testing, debugging, and an API-driven refactor.
 
 ## Full Pipeline:
 
