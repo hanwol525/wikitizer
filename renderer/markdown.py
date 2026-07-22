@@ -12,11 +12,126 @@ top-level `render_wiki` that wires all six sections plus the footnotes block int
 one document.
 """
 
+import re
 from typing import Optional
 
 from renderer.crosslink import CrosslinkMap, add_crosslinks, build_crosslink_map
 from renderer.footnotes import FootnoteRegistry
 from models.lore import Location, Character, Organization, Item, PeopleAndCultures
+
+
+def _flatten(text: str) -> str:
+    """Collapse internal whitespace to single spaces so a value renders as ONE
+    markdown list item. A merged HistoryEvent's description is ``"\\n\\n".join(...)``
+    of the pieces (the reconciler keeps both), and a line-wrapped ``date_text`` can
+    carry a stray newline ("151 to\\n200"); dropped straight into a ``- `` bullet,
+    that blank line ENDS the list item and spills the rest as an un-bulleted
+    paragraph. Flattening first keeps the bullet intact -- the same reason the entity
+    renderer joins its details into one paragraph."""
+    return re.sub(r"\s+", " ", text).strip()
+
+
+# Function words kept lowercase inside a title-cased name (never the first token). Matches
+# the campaign's real entities ("Houses of Maltaav", "The 12 Houses of Maltraav").
+_TITLE_STOPWORDS = frozenset(
+    "a an and at by for from in of on or the to vs with".split()
+)
+
+
+def _cap_token(tok: str) -> str:
+    """Capitalize the first letter of each HYPHEN-separated part, lowercasing the rest --
+    so a hyphen starts a new word ("half-elf" -> "Half-Elf") but an apostrophe does NOT
+    ("crown's" -> "Crown's", "MAL'TAAV" -> "Mal'taav", never "Crown'S"/"Mal'Taav")."""
+    return "-".join(p[:1].upper() + p[1:].lower() for p in tok.split("-"))
+
+
+def _is_screaming(tok: str) -> bool:
+    letters = [c for c in tok if c.isalpha()]
+    return bool(letters) and all(c.isupper() for c in letters)
+
+
+def _normalize_display_name(name: str) -> str:
+    """Render an entity/event name in one canonical Title Case regardless of how it was typed
+    in chat, WITHOUT disturbing names that are already well-cased.
+
+    Two paths:
+      * A SINGLE-CASE name (every letter upper, or every letter lower) that has an alphabetic
+        word >= 4 chars is fully title-cased: each token capitalized (apostrophe/hyphen-safe
+        via _cap_token), the first token always capitalized, and interior stop-words lowered.
+        This fixes both "CROWN'S NEST" and "crown's nest" -> "Crown's Nest", and
+        "the deathsworn" -> "The Deathsworn". The >=4 guard preserves short all-caps
+        acronyms/initials ("CJ", "DM", "FBI").
+      * Otherwise (MIXED case, or no long word) only a screaming ALL-CAPS token >= 4 is
+        title-cased ("Lake MUNDI" -> "Lake Mundi"); an already-good mixed name ("Lake Mundi",
+        "McDonald's") and short acronyms are left UNCHANGED.
+
+    Purely cosmetic: the reconciler already merged case-variants (_name_key lowercases) and
+    slug anchors lowercase too, so this creates no new pages and shifts no anchors."""
+    letters = [c for c in name if c.isalpha()]
+    single_case = bool(letters) and (
+        all(c.isupper() for c in letters) or all(c.islower() for c in letters))
+    has_long_word = any(len(w) >= 4 for w in re.findall(r"[A-Za-z]+", name))
+
+    if single_case and has_long_word:
+        out = []
+        first = True
+        for tok in name.split(" "):
+            if not tok:                      # keep any double-space structure intact
+                out.append(tok)
+                continue
+            capped = _cap_token(tok)
+            if not first and capped.lower() in _TITLE_STOPWORDS:
+                capped = capped.lower()
+            out.append(capped)
+            first = False
+        return " ".join(out)
+
+    # Mixed case (or a short all-caps acronym): only tame a screaming ALL-CAPS word.
+    tokens = name.split(" ")
+    if not any(_is_screaming(t) and sum(c.isalpha() for c in t) >= 4 for t in tokens):
+        return name
+    return " ".join(_cap_token(t) if _is_screaming(t) else t for t in tokens)
+
+
+_LEADING_ARTICLE_RE = re.compile(r"^(?:the|a|an)\s+", re.IGNORECASE)
+
+
+def _alpha_key(name: str) -> str:
+    """Alphabetical sort key that ignores a leading article, so "The Deathsworn" files
+    under D (not T) while the article stays in the displayed name. Case-insensitive."""
+    return _LEADING_ARTICLE_RE.sub("", name).strip().lower()
+
+
+def _is_renderable(entity) -> bool:
+    """True if an entity has anything to show: a polished prose body, at least one
+    detail, or at least one supporting quote (a footnote). A name-only entity with
+    none of these would render as a bare heading, so render_wiki drops it. A quote
+    alone still counts -- a named-but-factless entity that carries its name as a
+    supporting quote renders as a clean heading + footnote (the existing behaviour)."""
+    return bool(getattr(entity, "prose", None)) or bool(entity.details) or bool(entity.supporting_quotes)
+
+
+def _smart_join_details(details) -> str:
+    """Join an entity's `details` into one prose paragraph, giving each fact a
+    terminal period so they don't run together.
+
+    The extractors write each `Detail.text` as a short fragment WITHOUT a trailing
+    period (e.g. "A massive central lake"), so a bare space join produced run-ons
+    ("A massive central lake Home to three rings"). We add a "." to any fact that
+    doesn't already end in sentence punctuation, then space-join -- so a fact that
+    already ends in ".", "!" or "?" is left alone (no doubled period). A "." is not
+    a cross-link word-boundary char, so this is applied BEFORE add_crosslinks with no
+    effect on matching. This is the fallback body source; when the prose agent has
+    run, `entity.prose` is used instead (see _render_entity)."""
+    parts = []
+    for d in details:
+        t = d.text.strip()
+        if not t:
+            continue
+        if t[-1] not in ".!?":
+            t += "."
+        parts.append(t)
+    return " ".join(parts)
 
 
 # Both notes are heads-ups TO THE READER -- they never claim the tool reconciles
@@ -61,13 +176,19 @@ def _event_bullet(event, anchor: Optional[str], cmap: CrosslinkMap,
     #    for every undated and could-not-place event, so the clause simply vanishes.
     #    Truthiness is the RIGHT check here (unlike position): an empty date string
     #    should hide the tag exactly like None does.
-    date_tag = f" — {event.date_text}" if event.date_text else ""
+    date_tag = f" — {_flatten(event.date_text)}" if event.date_text else ""
 
     # 3. The description is the ONLY prose we cross-link -- we link it alone and
     #    build the bullet around it, never feeding the bold name or the date to the
     #    linker. `this_anchor` is this event's own anchor (or None), so a mention of
     #    the event's own name inside its description won't link back to itself.
-    linked_desc = add_crosslinks(event.description, cmap, anchor)
+    #    Source: the prose agent's polished description if it ran (`event.prose`), else
+    #    the raw `event.description`. Flatten first: a merged event's raw description is
+    #    "\n\n"-joined, and that blank line would otherwise break the bullet (spill a
+    #    second, un-bulleted paragraph); a polished body is one line but flattening is
+    #    harmless there.
+    raw_desc = event.prose if event.prose else event.description
+    linked_desc = add_crosslinks(_flatten(raw_desc), cmap, anchor)
 
     # 4. Footnote markers for the event's supporting quotes, in order, appended at
     #    the END of the description -- a history event is one description block, so
@@ -153,7 +274,7 @@ def render_history(events, cmap: CrosslinkMap, registry: FootnoteRegistry) -> st
         only_content = (n_systems == 0 and not undated)
         if not only_content:
             blocks.append("### Could Not Place")
-        rows = sorted(could_not_place, key=lambda r: (r[0].name, r[2]))
+        rows = sorted(could_not_place, key=lambda r: (_alpha_key(r[0].name), r[2]))
         blocks.append(_bullets(rows, cmap, registry))
 
     # Blank line between every block so markdown doesn't fuse a heading into the
@@ -179,12 +300,13 @@ def _render_entity(entity, anchor: str, cmap: CrosslinkMap,
     # raw HTML through; already logged against the renderer-choice decision.)
     heading = f'### <a id="{anchor}"></a>{entity.name}'
 
-    # details -> one prose paragraph, joined with spaces. We do NOT massage the
-    # facts to flow into each other; they just need to be present. The WHOLE
-    # paragraph is ONE cross-link block, with the entity's own anchor as
-    # `this_anchor`, so a mention of the entity's own name inside its body doesn't
-    # link back to itself.
-    body = add_crosslinks(" ".join(d.text for d in entity.details), cmap, anchor)
+    # Body source: the prose agent's polished paragraph if it ran (`entity.prose`),
+    # else the details joined into one paragraph with per-fact terminal periods
+    # (`_smart_join_details`). Either way the WHOLE paragraph is ONE cross-link
+    # block, with the entity's own anchor as `this_anchor`, so a mention of the
+    # entity's own name inside its body doesn't link back to itself.
+    raw_body = entity.prose if entity.prose else _smart_join_details(entity.details)
+    body = add_crosslinks(raw_body, cmap, anchor)
 
     # Footnote markers for the entity's quote pool, appended at the end of the body.
     refs = "".join(f"[^{registry.add(q)}]" for q in entity.supporting_quotes)
@@ -213,7 +335,7 @@ def _render_entity_section(label: str, pairs, cmap: CrosslinkMap,
         return ""
     # Alphabetical by name; the anchor (always present, always unique) is the
     # tiebreak, so two same-named entries render in a stable order every run.
-    rows = sorted(pairs, key=lambda p: (p[0].name, p[1]))
+    rows = sorted(pairs, key=lambda p: (_alpha_key(p[0].name), p[1]))
     bodies = "\n\n".join(_render_entity(ent, anchor, cmap, registry)
                          for ent, anchor in rows)
     return f"## {label}\n\n{bodies}"
@@ -260,6 +382,42 @@ def render_wiki(locations, characters, events, organizations, items, people,
     function is the seam the eventual whole-pipeline entry point (main.py) plugs
     into -- it takes the six typed lists explicitly.
     """
+    # Canonicalize name casing for display BEFORE anything reads `.name`/aliases. We rebuild
+    # each entity + event with a Title-Cased name AND Title-Cased alias texts, so the heading,
+    # the alias display, and the (case-sensitive) cross-link surface pool are all built from the
+    # SAME canonical strings and stay in sync -- normalizing only the heading would desync it
+    # from the pool and stop the name linking. Anchors are unaffected (slugify lowercases);
+    # model_copy leaves the caller's originals untouched.
+    def _cased(seq):
+        out = []
+        for e in seq:
+            aliases = [a.model_copy(update={"text": _normalize_display_name(a.text)})
+                       for a in e.aliases]
+            out.append(e.model_copy(update={
+                "name": _normalize_display_name(e.name), "aliases": aliases}))
+        return out
+    locations = _cased(locations)
+    characters = _cased(characters)
+    events = _cased(events)
+    organizations = _cased(organizations)
+    items = _cased(items)
+    people = _cased(people)
+
+    # Drop truly-empty entities BEFORE building the cross-link map. An entity with no
+    # renderable body (no prose, no details) AND no supporting quotes has nothing to
+    # show -- it would render as a bare heading (or a lone footnote-less stub). This is
+    # where a business wrongly grabbed as a name-only Location, or a name-only entity
+    # whose only "fact" failed the verbatim-quote check, gets pruned. Filtering HERE
+    # (not inside _render_entity) is load-bearing: a dropped entity must be neither an
+    # anchor target NOR a cross-link source, so a mention of its name elsewhere renders
+    # as plain text instead of a link to a page that doesn't exist. Events are never
+    # filtered -- a HistoryEvent always has a (required) description.
+    locations = [e for e in locations if _is_renderable(e)]
+    characters = [e for e in characters if _is_renderable(e)]
+    organizations = [e for e in organizations if _is_renderable(e)]
+    items = [e for e in items if _is_renderable(e)]
+    people = [e for e in people if _is_renderable(e)]
+
     # Concatenate the five entity types into ONE list for the map (build_crosslink_map
     # takes a single entity list). The order here only decides which entity keeps
     # the clean slug on a cross-type name clash -- cosmetic, since both still get an

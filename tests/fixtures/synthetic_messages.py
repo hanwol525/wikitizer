@@ -114,4 +114,58 @@ CASES = [
             "history": {"min_count": 1, "date_substring": "342"},
         },
     ),
+    # 22. A country (a PLACE) vs its people: "Vorland" (a bare country with a
+    # capital) must go to Locations, NOT People & Cultures; "the Tolvi" (the distinct
+    # people who live there) go to People & Cultures. This isolates the
+    # over-extraction seam the People & Cultures prompt got its Locations-boundary
+    # bullet for -- the bug where the extractor minted a bare country as a bogus
+    # second "people" alongside the correct people entry. Country and people names
+    # are deliberately UNRELATED ("Vorland" vs "Tolvi") so the substring matcher can
+    # tell the bogus country-as-people entry from a legit people entry (a
+    # country-derived name like "people of Vorland" would make "Vorland" a substring
+    # of the correct entry and defeat the reject check).
+    Case(
+        id="country_vs_people",
+        message=_msg(
+            "dm",
+            "Vorland and the Tolvi arent the same thing — worth keeping straight. Vorland is just a country in the empire: it sits east of the Cloud Mountains with Redgate as its capital, thats the whole of it. The Tolvi are the people — the horse-clans who actually live out there, with their own tongue and a stubborn streak, still sore about being annexed.",
+        ),
+        expect={
+            "people": {"expect": ["Tolvi"], "reject": ["Vorland"]},
+            "locations": {"expect": ["Vorland"], "reject": ["Tolvi"]},
+        },
+    ),
+    # 23. Name-only groups under a stated header: a comma-separated list of teams
+    # introduced as "kickball teams". Each name becomes its own name-only
+    # organization (min_count guards the list-splitting), and its DETAIL should draw
+    # on the stated "kickball" framing ("A kickball team") rather than the generic
+    # "A named group" -- that label quality is EYEBALL-ONLY (the harness asserts on
+    # name/alias, not detail text), so this Case's automated job is only to confirm
+    # the split still happens; read the organizations eyeball report for the label.
+    Case(
+        id="org_label_from_context",
+        message=_msg(
+            "player_c",
+            "the local kickball teams are the Bramblewick Badgers, the Stonehollow Stags, and the Marsh Harriers — big rivalry this season lol",
+        ),
+        expect={
+            "organizations": {"expect": ["Badgers"], "min_count": 2},
+        },
+    ),
+    # 24. A present-relative offset ("around 200 years ago") IS a date -- a point in
+    # time relative to now -- so the history extractor must capture it into date_text
+    # (verbatim), where the timeline pass resolves it against the campaign year. This
+    # is the positive twin of #17 hist_swamp, which asserts date_is_none for a DURATION
+    # ("30 years of it") and an EVENT-relative clue ("before the Imperium") -- both must
+    # stay None. Keep both green: present-offset -> captured; duration/event-relative -> not.
+    Case(
+        id="hist_present_offset",
+        message=_msg(
+            "dm",
+            "The Great Sundering happened around 200 years ago — it split the northern continent clean in two, whole cities just swallowed by the sea overnight.",
+        ),
+        expect={
+            "history": {"min_count": 1, "date_substring": "200 years ago"},
+        },
+    ),
 ]

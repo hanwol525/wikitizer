@@ -11,7 +11,7 @@ suite offline: no network, no API key, no `integration` marker.
 Two isolation seams are used on purpose:
   * `_build_agents` is overridden (the brief's seam) to swap in stub agents.
   * The pure parse+filter step lives directly in `run()` (not in an agent), so a
-    `monkeypatch` fixture replaces `orchestrator.parse_chat_log` /
+    `monkeypatch` fixture replaces `orchestrator.parse_messages` /
     `orchestrator.filter_reactions` with canned message output -- fully isolating
     the orchestrator from the Phase 2 parser's file format. ONE additive test
     (`test_run_over_a_real_parsed_log`) skips that monkeypatch and feeds a real
@@ -133,8 +133,9 @@ class _StubReconciler:
             raise RuntimeError("boom: reconcile")
         return list(entries)
 
-    def order_history(self, events):
+    def order_history(self, events, current_year=None):
         self.order_called = True
+        self.order_current_year = current_year   # captured so a test can assert threading
         if self.order_raise:
             raise RuntimeError("boom: order_history")
         # Stamp a consistent calendar_system + ascending position, as if the real
@@ -162,28 +163,59 @@ def _extractors(**overrides):
     return exts
 
 
+class _StubProse:
+    """Stub prose agent. Default: pass-through (prose stays None, so the renderer falls
+    back to joining the raw details/description). `body="X"` stamps that marker prose on
+    every entity/event (to assert the polished body reaches the renderer). `raise_on=True`
+    exercises the degrade path (_apply_prose catches it and renders un-polished). Counts
+    calls so a test can assert the fan-out (5 noun types + 1 events per doc)."""
+
+    def __init__(self, raise_on=False, body=None):
+        self.raise_on = raise_on
+        self.body = body
+        self.entity_calls = 0
+        self.event_calls = 0
+
+    def polish_entities(self, entities):
+        self.entity_calls += 1
+        if self.raise_on:
+            raise RuntimeError("boom: prose")
+        if self.body is None:
+            return list(entities)
+        return [e.model_copy(update={"prose": self.body}) for e in entities]
+
+    def polish_events(self, events):
+        self.event_calls += 1
+        if self.raise_on:
+            raise RuntimeError("boom: prose")
+        if self.body is None:
+            return list(events)
+        return [e.model_copy(update={"prose": self.body}) for e in events]
+
+
 class _StubbedOrchestrator(Orchestrator):
     """Orchestrator with `_build_agents` overridden to return the stub agents, so
     run()'s sequencing + error policy run with zero real Claude calls."""
 
-    def __init__(self, noise, extractors, reconciler):
+    def __init__(self, noise, extractors, reconciler, prose=None):
         # A sentinel client: _build_agents is overridden, so it's never used.
         super().__init__(client=object())
         self._noise = noise
         self._extractors = extractors
         self._reconciler = reconciler
+        self._prose = prose if prose is not None else _StubProse()
 
     def _build_agents(self, config):
-        return self._noise, self._extractors, self._reconciler
+        return self._noise, self._extractors, self._reconciler, self._prose
 
 
 @pytest.fixture
 def patched_parse(monkeypatch):
     """Replace the pure parse+filter step so run() gets a canned, non-empty message
     list without any real file. Isolates the orchestrator from the parser format."""
-    def fake_parse(filepath, speaker_map):
+    def fake_parse(filepath, speaker_map, input_format="auto"):
         return [build_message("Alice", "Riverton sits on the river Mund.", "group.txt")]
-    monkeypatch.setattr(orchestrator, "parse_chat_log", fake_parse)
+    monkeypatch.setattr(orchestrator, "parse_messages", fake_parse)
     monkeypatch.setattr(orchestrator, "filter_reactions", lambda msgs: list(msgs))
 
 
@@ -191,10 +223,10 @@ def patched_parse(monkeypatch):
 def patched_parse_multi(monkeypatch):
     """Like patched_parse, but tags each message with its file's BARE name, so a
     multi-file `files` list yields multi-source messages (what exclusion needs)."""
-    def fake_parse(filepath, speaker_map):
+    def fake_parse(filepath, speaker_map, input_format="auto"):
         name = Path(filepath).name
         return [build_message("Alice", f"Content from {name}.", name)]
-    monkeypatch.setattr(orchestrator, "parse_chat_log", fake_parse)
+    monkeypatch.setattr(orchestrator, "parse_messages", fake_parse)
     monkeypatch.setattr(orchestrator, "filter_reactions", lambda msgs: list(msgs))
 
 
@@ -308,11 +340,12 @@ def test_shared_client_threads_into_every_agent():
     # Call the REAL _build_agents and confirm one injected client reaches them all.
     fake = object()
     orch = Orchestrator(client=fake)
-    noise, extractors, reconciler = orch._build_agents(_config())
+    noise, extractors, reconciler, prose = orch._build_agents(_config())
 
     assert orch.client is fake
     assert noise.client is fake
     assert reconciler.client is fake
+    assert prose.client is fake
     assert len(extractors) == 6
     for ext in extractors.values():
         assert ext.client is fake
@@ -322,9 +355,10 @@ def test_shared_client_threads_into_every_agent():
 
 def test_run_over_a_real_parsed_log(tmp_path, caplog):
     """Additive hardening beyond the brief's 8 groups: skip the parse monkeypatch
-    and feed a REAL minimal group log, so parse_chat_log's arg order and the
-    filter_reactions wiring are exercised for real (a swapped-arg regression the
-    monkeypatched tests would mask). Stubs still handle the agent layer."""
+    and feed a REAL minimal group log, so the parse_messages -> (auto-detect ->
+    parse_chat_log) arg order and the filter_reactions wiring are exercised for real
+    (a swapped-arg regression the monkeypatched tests would mask). The legacy format
+    is auto-detected from its dashes row. Stubs still handle the agent layer."""
     caplog.set_level(logging.INFO)
     log = tmp_path / "group.txt"
     # Minimal but valid group export: participant header (leads with a comma), the
@@ -541,3 +575,38 @@ def test_restricted_reheads_after_a_merge_under_a_secret_canonical(patched_parse
     assert "Blackspire Keep" not in result.restricted  # re-headed away
     assert "the old fort" in result.restricted         # to the public alias
     assert "lich" not in result.restricted             # the secret fact is carved too
+
+
+# --- Phase C: the prose polish stage wiring --------------------------------- #
+
+def test_prose_polishes_bodies_in_the_full_doc(patched_parse):
+    # A stub prose agent that stamps a marker body; it must reach the rendered wiki,
+    # and the fan-out is one call per noun type (5) + one for events.
+    prose = _StubProse(body="POLISHEDMARKERTEXT")
+    orch = _StubbedOrchestrator(_StubNoise(), _extractors(), _StubReconciler(), prose=prose)
+    out = orch.run(["dummy.txt"], _config()).full
+    assert "POLISHEDMARKERTEXT" in out          # polished body is what renders
+    assert prose.entity_calls == 5              # locations/characters/orgs/items/people
+    assert prose.event_calls == 1
+
+
+def test_prose_degrades_to_unpolished_on_failure(patched_parse, caplog):
+    # A prose agent that raises must NOT crash the run; the un-polished body renders.
+    caplog.set_level(logging.ERROR)
+    orch = _StubbedOrchestrator(_StubNoise(), _extractors(), _StubReconciler(),
+                                prose=_StubProse(raise_on=True))
+    out = orch.run(["dummy.txt"], _config()).full
+    assert "A river town." in out                        # fell back to the joined details
+    assert any("[REVIEW]" in r.getMessage() and "prose" in r.getMessage().lower()
+               for r in caplog.records)
+
+
+def test_prose_runs_on_both_full_and_restricted(patched_parse_multi):
+    # With exclusions, the prose pass runs on the full doc AND again on the carved
+    # restricted doc: 2x (5 noun types) + 2x events.
+    prose = _StubProse()   # pass-through, just counting
+    orch = _StubbedOrchestrator(_StubNoise(), _extractors(), _StubReconciler(), prose=prose)
+    orch.run(["logs/group.txt", "logs/secret.txt"], _config(),
+             exclude_sources=["secret.txt"])
+    assert prose.entity_calls == 10
+    assert prose.event_calls == 2

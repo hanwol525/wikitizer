@@ -50,6 +50,7 @@ Do NOT extract a generic, unnamed object that has no name and no such tie ("a sw
 
 Boundary with the other extractors:
 - A place, a person, an organization, and a people or culture are NOT items — those are other extractors. An item is a physical object you could in principle pick up or carry.
+- FIXED INFRASTRUCTURE is NOT an item, even though it is physical and man-made: a railroad, road, highway, bridge, canal, aqueduct, wall, gate, fortification, tower, building, monument, or dam is a structure you could never pick up or carry (e.g. "the Continental Railroad", "the King's Road", "the Great Wall"). Skip it here — such a structure belongs to the locations extractor, or stays a detail of the place it serves; it is NEVER an item. The test is portability: if one person could not in principle carry it, it is not an item.
 
 For each item, extract:
 - name: the item's primary/canonical name (or your short descriptive label if it has no proper name).
@@ -58,7 +59,7 @@ For each item, extract:
 
 For each detail, provide three things:
 - detail: a short factual statement about the item, in your own words (e.g. "The only thing that can seal the rift").
-- quote: the EXACT, VERBATIM text from the message that supports this detail. Copy it character-for-character. Do NOT paraphrase, shorten, fix typos, or change punctuation. It must appear word-for-word in the message.
+- quote: the EXACT, VERBATIM text from the message that supports this detail. Copy it character-for-character. Do NOT paraphrase, shorten, fix typos, or change punctuation. It must appear word-for-word in the message. If the copied text contains quotation marks, keep them EXACTLY as they appear — leave curly “ ” marks curly, do not straighten them — because an unescaped straight quote inside a JSON value breaks the whole batch.
 - source_id: the integer id of the message you took the quote from.
 
 Hard rules:
@@ -124,7 +125,8 @@ class ItemExtractor(BaseExtractor):
             if not isinstance(detail_text, str) or not isinstance(quote_text, str):
                 logger.warning("Item detail missing a string 'detail'/'quote', ignoring: %r", d)
                 continue
-            q = self._resolve_quote(quote_text, d.get("source_id"), batch)
+            q = self._resolve_quote(quote_text, d.get("source_id"), batch,
+                                    detail_text=detail_text)
             if q is None:                       # _resolve_quote already logged why
                 continue
             details_out.append(Detail(text=detail_text, source_files=[q.source_file]))

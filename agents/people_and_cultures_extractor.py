@@ -43,13 +43,15 @@ logger = logging.getLogger(__name__)
 
 SYSTEM_PROMPT = """You are a worldbuilding extractor for an exported D&D group chat. The campaign is a homebrew tabletop game set in a fictional world. Your job is to find every distinct PEOPLE or CULTURE in the messages and extract structured facts about it. You do not classify the chat, summarize it, or invent anything.
 
-A "people or culture" is a COLLECTIVE group defined by shared identity: a race, a species, an ethnic group, a tribe or clan, a nation's people, or a culture. It is the group as a whole — who these people are and what they are like — not any single member of it. Examples: "the Krieg" as a seafaring people, "direwolves" as a kind of creature, "the hill clans".
+A "people or culture" is a COLLECTIVE group defined by shared identity: a race, a species, an ethnic group, a tribe or clan, the people of a nation (its inhabitants, NOT the nation itself), or a culture. It is the group as a whole — who these people are and what they are like — not any single member of it. Examples: "the Krieg" as a seafaring people, "direwolves" as a kind of creature, "the hill clans".
 
 Include any people or culture that the messages name or clearly describe as a distinct group. Unlike items, you do NOT need a proper name or a tie — a clearly-described people counts even if it is only ever called "the northern tribes". If the group has no proper name of its own, write a SHORT descriptive label as its name.
 
 Boundaries with the other extractors — this one is easy to confuse, so read carefully:
 - A single INDIVIDUAL is NOT a people or culture — that is a character. "Kriggy", one member of the Krieg, is a character; "the Krieg" as a whole people belongs here. One direwolf named in a fight is a character; "direwolves" as a kind of creature belongs here.
 - A formal, structured BODY is NOT a people or culture — that is an organization. A culture is "who these people are"; an organization is "a structured group they formed" (a guild, a government, a church). "the Krieg" as a people belongs here; "the Krieger Imperium", their state, is an organization.
+- A group defined by a shared PROFESSION, TRADE, ROLE, or FUNCTION — not by ancestry — is NOT a people or culture. An academic, magical, or military CORPS or ORDER — "the War Mages", "the Research Mages", "the Archmages", "the city guard", "the royal cartographers" — is an ORGANIZATION (or, if truly a single person, a character), never a people. A collective label ending in a role or trade (-mage, -mages, -smith, -guard, -knight, -warden, -wright, -sworn) names a JOB, not an ancestry, so it is an ORGANIZATION even when its members share magical training. A people or culture is defined by shared ANCESTRY, ETHNICITY, SPECIES, NATIONALITY, or cultural heritage — not by a job. When you are unsure whether a group is a people or an organization, and it has any leadership, military, government, training body, or formal structure, treat it as an ORGANIZATION and leave it out of here — a duplicate page split across two types is worse than one well-placed page.
+- A PLACE is NOT a people or culture — that is a location. A country, nation, region, city, or realm is a place, captured by the locations extractor (its geography, territory, capital, where it sits). Only the PEOPLE of such a place — its inhabitants taken as a distinct group ("the people of Gol", "the Krieg") — belong here; the place itself does not. If the messages describe only a place (where it sits, its capital, its borders) and never describe its inhabitants as a distinct people, do NOT extract it here at all — leave the place to the locations extractor.
 
 For each people or culture, extract:
 - name: the group's primary/canonical name (or your short descriptive label if it has no proper name).
@@ -58,7 +60,7 @@ For each people or culture, extract:
 
 For each detail, provide three things:
 - detail: a short factual statement about the group, in your own words (e.g. "A seafaring people from the northern coasts").
-- quote: the EXACT, VERBATIM text from the message that supports this detail. Copy it character-for-character. Do NOT paraphrase, shorten, fix typos, or change punctuation. It must appear word-for-word in the message.
+- quote: the EXACT, VERBATIM text from the message that supports this detail. Copy it character-for-character. Do NOT paraphrase, shorten, fix typos, or change punctuation. It must appear word-for-word in the message. If the copied text contains quotation marks, keep them EXACTLY as they appear — leave curly “ ” marks curly, do not straighten them — because an unescaped straight quote inside a JSON value breaks the whole batch.
 - source_id: the integer id of the message you took the quote from.
 
 Hard rules:
@@ -76,10 +78,10 @@ If you find no peoples or cultures, return an empty array []. Do not output any 
 
 EXAMPLE
 Input:
-[{"id": 0, "content": "The Krieg are a seafaring people from the northern coasts"}, {"id": 1, "content": "Krieg raiders are feared for their longships"}, {"id": 2, "content": "Kriggy is the disgraced son of a noble house"}, {"id": 3, "content": "direwolves hunt in packs across the northern tundra"}, {"id": 4, "content": "what's everyone's AC for tomorrow"}]
+[{"id": 0, "content": "The Krieg are a seafaring people from the northern coasts"}, {"id": 1, "content": "Krieg raiders are feared for their longships"}, {"id": 2, "content": "Kriggy is the disgraced son of a noble house"}, {"id": 3, "content": "direwolves hunt in packs across the northern tundra"}, {"id": 4, "content": "what's everyone's AC for tomorrow"}, {"id": 5, "content": "Gol is a country in the empire, with Crown's Nest as its capital"}]
 Output:
 [{"name": "The Krieg", "aliases": [], "details": [{"detail": "A seafaring people from the northern coasts", "quote": "The Krieg are a seafaring people from the northern coasts", "source_id": 0}, {"detail": "Their raiders are feared for their longships", "quote": "Krieg raiders are feared for their longships", "source_id": 1}]}, {"name": "Direwolves", "aliases": [], "details": [{"detail": "Hunt in packs across the northern tundra", "quote": "direwolves hunt in packs across the northern tundra", "source_id": 3}]}]
-(Notes on the example: "the Krieg" is a people — kept. Message 2 produced nothing here — "Kriggy" is a single individual, who belongs to the characters extractor, not this one. "Direwolves" as a kind of creature is a people/culture; a single named direwolf would instead be a character. Message 4 is game mechanics.)"""
+(Notes on the example: "the Krieg" is a people — kept. Message 2 produced nothing here — "Kriggy" is a single individual, who belongs to the characters extractor, not this one. "Direwolves" as a kind of creature is a people/culture; a single named direwolf would instead be a character. Message 4 is game mechanics. Message 5 produced nothing here — "Gol" is a country, a PLACE: the message states only its geography and capital, never its inhabitants as a distinct people, so no people entry is minted for it (that is the locations extractor's job). Only "the people of Gol", described as a group, would belong here.)"""
 
 
 class PeopleAndCulturesExtractor(BaseExtractor):
@@ -124,7 +126,8 @@ class PeopleAndCulturesExtractor(BaseExtractor):
             if not isinstance(detail_text, str) or not isinstance(quote_text, str):
                 logger.warning("People/culture detail missing a string 'detail'/'quote', ignoring: %r", d)
                 continue
-            q = self._resolve_quote(quote_text, d.get("source_id"), batch)
+            q = self._resolve_quote(quote_text, d.get("source_id"), batch,
+                                    detail_text=detail_text)
             if q is None:                       # _resolve_quote already logged why
                 continue
             details_out.append(Detail(text=detail_text, source_files=[q.source_file]))

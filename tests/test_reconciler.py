@@ -658,9 +658,16 @@ def test_validate_date_rejects_event_without_date_text():
     assert _validate_date_decision(_dd((0, "AR", [1])), [hev("A")])
 
 
-def test_validate_date_rejects_empty_or_nonpositive_parts():
+def test_validate_date_rejects_empty_or_negative_parts():
+    # empty parts -> still rejected; a NEGATIVE part -> still rejected.
     assert _validate_date_decision(_dd((0, "AR", [])), [hev("A", date_text="1 AR")])
-    assert _validate_date_decision(_dd((0, "AR", [0])), [hev("A", date_text="0 AR")])
+    assert _validate_date_decision(_dd((0, "AR", [-1])), [hev("A", date_text="-1 AR")])
+
+
+def test_validate_date_accepts_year_zero():
+    # year 0 is a REAL in-world date ("Ferridus Krieger [0 to 50]"); parts:[0] must be
+    # accepted, not rejected -- rejecting it used to undate the whole timeline.
+    assert _validate_date_decision(_dd((0, "AR", [0])), [hev("A", date_text="0 AR")]) == []
 
 
 def test_validate_date_rejects_duplicate_index():
@@ -902,9 +909,12 @@ def test_validate_placement_rejects_double_placement():
     assert _validate_placement_decision(_pd(("AR#0", [1]), ("AR#1", [1])), evs, {0}, _setup_gaps())
 
 
-def test_validate_placement_rejects_duplicate_gap():
+def test_validate_placement_coalesces_duplicate_gap():
+    # Run-1.13: a repeated gap ID is BENIGN now -- the two event lists coalesce into one
+    # gap rather than failing as "gap listed more than once" (the error that burned all
+    # three retries and stranded every reign event). So this validates CLEANLY.
     evs = [hev("M", date_text="1350"), hev("R"), hev("S")]
-    assert _validate_placement_decision(_pd(("AR#0", [1]), ("AR#0", [2])), evs, {0}, _setup_gaps())
+    assert _validate_placement_decision(_pd(("AR#0", [1]), ("AR#0", [2])), evs, {0}, _setup_gaps()) == []
 
 
 def test_validate_placement_rejects_out_of_range_event():

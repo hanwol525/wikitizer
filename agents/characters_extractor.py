@@ -43,8 +43,14 @@ from pydantic import ValidationError
 from agents.base_extractor import BaseExtractor
 from models.lore import Alias, Character, Detail
 from models.message import Message
+from player_map import build_character_lookup
 
 logger = logging.getLogger(__name__)
+
+# Loud, human-actionable flag prefix (matches the reconciler's), so a player/character
+# conflation flag lands in the Phase 5.3 review funnel rather than drowning in routine
+# warnings. Defined locally to avoid importing the reconciler (a peer agent).
+REVIEW_PREFIX = "[REVIEW]"
 
 
 SYSTEM_PROMPT = """You are a worldbuilding extractor for an exported D&D group chat. The campaign is a homebrew tabletop game set in a fictional world. Your job is to find every NAMED character (a person or creature in the fictional world) in the messages and extract structured facts about them. You do not classify the chat, summarize it, or invent anything. A character is a single INDIVIDUAL being — one person or one creature. A whole people, race, species, or culture taken as a group is NOT a character and is captured by a different extractor: "Kriggy" (one person) is a character, but "the Krieg" (a people) is not; a single named direwolf in a fight is a character, but "direwolves" as a kind of creature is not. A named individual still counts even when described in a historical, legendary, or past-tense context — a famous figure from the world's history (a hero, ruler, or wizard from generations ago) is a character even if long dead or no longer active in the campaign. This does NOT extend to groups: a family, house, clan, dynasty, or whole people is never a character no matter how it is described (those belong to the organizations or peoples extractors) — only a single named individual. An individual known by a TITLE, EPITHET, or SOBRIQUET (e.g. "the Wizard Strong", "the Mad King") is a named character even if their birth name is unknown, omitted, or forgotten — use the epithet as the name. And when a single named individual is mentioned inside a passage about their family, house, or dynasty, still extract that individual as a character: the family itself is not a character, but the person within it is.
@@ -54,23 +60,24 @@ CRITICAL — players vs characters. The following names are the REAL PEOPLE play
 - EXCEPTION: a character really can share a name with a real person — by coincidence, or because a player named their character after someone at the table as a joke. So if the context clearly shows a roster name is being used as a CHARACTER — someone acting in-character, an NPC by that name introduced in the world ("we hired a sellsword named Sam at the docks"), or the players explicitly flagging "the character, not the person" — then DO extract it as a character. Set name to that shared name, and set player_name to whoever actually plays them (which is usually NOT the person of the same name, since you don't play yourself; for an NPC, use null).
 
 For each named character, extract:
-- name: the character's in-world (fictional) name.
-- aliases: a list of any OTHER names this same character is called — nicknames, shortened forms, titles, or epithets (empty list if none). For example, if a character usually called Kriggy is also referred to as Kriggy Krieger, that fuller form is an alias.
+- name: the character's in-world (fictional) name. If the text indicates the character has a REAL/true/actual/birth name AND a separate assumed name they go by — an alias, cover, or fake name they "give to others" — use the REAL name here and record the assumed name as an alias, even if the assumed name is used more often.
+- aliases: a list of any OTHER names this same character is called — nicknames, shortened forms, titles, epithets, or an assumed/cover name (empty list if none). For example, if a character usually called Kriggy is also referred to as Kriggy Krieger, that fuller form is an alias.
 - is_pc: true if this character is played by one of the real people listed above (a "player character"); false if it is a non-player character run by the game master (an NPC).
 - player_name: if is_pc is true, the real person who plays them — and it MUST be one of the real people listed above. If the character is an NPC, or you are not sure who plays them, use null.
 - details: a list of factual statements about the character, each paired with the exact quote that supports it.
 
 For each detail, provide three things:
 - detail: a short factual statement about the character, in your own words (e.g. "The disgraced son of a noble house").
-- quote: the EXACT, VERBATIM text from the message that supports this detail. Copy it character-for-character. Do NOT paraphrase, shorten, fix typos, or change punctuation. It must appear word-for-word in the message.
+- quote: the EXACT, VERBATIM text from the message that supports this detail. Copy it character-for-character. Do NOT paraphrase, shorten, fix typos, or change punctuation. It must appear word-for-word in the message. If the copied text contains quotation marks, keep them EXACTLY as they appear — leave curly “ ” marks curly, do not straighten them — because an unescaped straight quote inside a JSON value breaks the whole batch.
 - source_id: the integer id of the message you took the quote from.
 
-Keep flavor, drop mechanics. KEEP backstory, personality, relationships, titles, and role in the world. IGNORE game mechanics entirely: character class, subclass, feats, level, ability scores, armor class (AC), hit points, dice, and build choices are NOT character facts. A single message can mix both — keep only the flavor part. Example: from "Kriggy's the disgraced son of a noble house, Battlemaster with 18 AC", extract "the disgraced son of a noble house" and ignore the Battlemaster/AC part. When you quote, quote only the flavor span, not the mechanics.
+Keep flavor, drop mechanics. KEEP backstory, personality, relationships, titles, role in the world, and a character's RACE or SPECIES (warforged, elf, dwarf, half-orc, and the like) — a character's race is WHO THEY ARE in the world, a kept identity fact, NOT a mechanic. IGNORE game-mechanics build details: character class, subclass, feats, level, ability scores, armor class (AC), hit points, dice, and build choices are NOT character facts. A single message can mix both — keep only the flavor part. Example: from "Kriggy's the disgraced son of a noble house, Battlemaster with 18 AC", extract "the disgraced son of a noble house" and ignore the Battlemaster/AC part. When you quote, quote only the flavor span, not the mechanics.
 
 Hard rules:
 - Do NOT invent characters, details, or quotes. Every detail must be supported by a real quote from a real message.
 - Do NOT paraphrase quotes. The "detail" is yours to phrase; the "quote" must be copied exactly. Each quote is automatically checked against the message you cite in source_id; if it cannot be found there word-for-word, that detail is thrown away — so copy carefully and cite the right id.
 - Only use facts actually stated in the messages. If something is implied but not stated, leave it out.
+- Attach each detail ONLY to the character it is explicitly about. Do NOT transfer a fact, relationship, or trait from one character to another, and do NOT infer a relationship that was not stated. When a message states a relationship (e.g. "X is Y's uncle"), record it only for the character who is its stated subject and keep the direction exactly as stated — do not flip it or reassign it to a different character.
 - A character can be mentioned across several messages; pull details (and any aliases) from wherever they appear. Do not try to merge duplicate characters or unify their names across separate mentions beyond choosing a reasonable canonical name and the aliases a message clearly gives — the rest of the merging is handled later.
 - If a character is named but no facts are stated, you may still include them with an empty details list.
 
@@ -99,9 +106,17 @@ class CharactersExtractor(BaseExtractor):
     is the anti-conflation anchor, so the caller must supply it rather than let it
     default to empty and silently weaken the trap protection. The extractor itself
     does no file I/O; the orchestrator sources the names.
+
+    ``player_map`` (OPTIONAL) is the user's declared party -- a ``{player: [character
+    name, alias, ...]}`` config (gitignored, like the speaker map). When a character's
+    name or an alias matches a declared name, its ``player_name`` is stamped
+    AUTHORITATIVELY from the map (overriding the LLM's guess) and ``is_pc`` is forced
+    True. This is the ground truth an automatic heuristic can't recover: who plays a
+    character is a fact only the group knows. Absent -> the LLM's roster-validated
+    guess stands (fresh-clone safe).
     """
 
-    def __init__(self, player_names, **kwargs):
+    def __init__(self, player_names, player_map=None, **kwargs):
         super().__init__(**kwargs)
         # sorted() so the roster string is byte-identical every run -- a stable
         # system prompt is what lets prompt caching kick in later (the cost lever).
@@ -123,6 +138,31 @@ class CharactersExtractor(BaseExtractor):
         self.system_prompt = SYSTEM_PROMPT.replace("__PLAYER_ROSTER__", roster_str)
         # Lowercased set for the case-insensitive player_name check + name-collision flag.
         self._roster_lookup = {n.strip().lower() for n in clean_names}
+        # Authoritative character-name -> player lookup from the declared party (may be
+        # empty). Normalized (strip+lower) keys, matching _roster_lookup's convention.
+        self._character_to_player = build_character_lookup(player_map or {})
+        # Typo catch: a declared player who isn't a known real person is almost
+        # certainly a config mistake -- warn once, but don't reject (the user's config
+        # is the authority, and an over-strict rejection would just hide their edit).
+        for declared_player in set(self._character_to_player.values()):
+            if self._roster_lookup and declared_player.strip().lower() not in self._roster_lookup:
+                logger.warning(
+                    "player_map declares player %r, who is not in the speaker-map roster; "
+                    "using it anyway (check for a typo).", declared_player,
+                )
+
+    def _declared_player_for(self, name, aliases) -> Optional[str]:
+        """The declared player for this character if its NAME or any alias matches the
+        player_map, else None. Matched normalized (strip+lower). Empty map -> always None."""
+        if not self._character_to_player:
+            return None
+        candidates = [name] + [a.text for a in aliases]
+        for cand in candidates:
+            if isinstance(cand, str):
+                hit = self._character_to_player.get(cand.strip().lower())
+                if hit is not None:
+                    return hit
+        return None
 
     def _build_entry(self, raw: dict, batch: list[Message]) -> Optional[Character]:
         """Build one :class:`Character` from a single response object, or ``None``
@@ -160,17 +200,36 @@ class CharactersExtractor(BaseExtractor):
             )
             player_name = None
 
-        # Name-collision flag: keep the character (it's usually a coincidence or a
-        # deliberate joke), but surface it for the later human review step -- this
-        # is what catches a genuine player/character mix-up that the player_name
-        # check above can't (a real "Sam" character with player_name "Sam" passes
-        # that check). Empty roster auto-handles: ``name ... in set()`` is False.
-        if name.strip().lower() in self._roster_lookup:
-            logger.warning(
-                "Character name %r matches a real person in the roster; keeping it but flagging "
-                "(coincidence/joke, or a player/character mix-up?). is_pc=%r player_name=%r",
-                name, is_pc, player_name,
-            )
+        # Authoritative override from the declared party (player_map). Who plays a
+        # character is a fact only the group knows -- no automatic heuristic can recover
+        # it -- so when the user has declared this character (by name OR any alias), we
+        # take their word over the LLM's guess: stamp the player and force is_pc True.
+        # This flows through reconcile unchanged (every fragment carries the same
+        # player, so the merge can't veto) and drives de-conflation correctly.
+        declared_player = self._declared_player_for(name, aliases)
+        if declared_player is not None:
+            if player_name != declared_player or not is_pc:
+                logger.debug(
+                    "Character %r assigned to player %r from the declared party (was is_pc=%r "
+                    "player_name=%r).", name, declared_player, is_pc, player_name,
+                )
+            player_name = declared_player
+            is_pc = True
+        elif self._character_to_player:
+            # A player_map IS configured but this character is UNDECLARED: the config is
+            # the sole source of truth for who plays whom, so we do NOT keep the LLM's
+            # player_name guess. A plausible narrator name surviving here (e.g. "Conrad"
+            # on "Kriggy Krieger") fabricates a player_name clash that vetoes a legitimate
+            # merge downstream and splits one character into two pages. Dropping it lets
+            # the reconciler merge cleanly (the declared fragment carries the real player).
+            # When NO player_map is configured, we skip this branch and keep the legacy
+            # roster-validated guess (the offline/synthetic path).
+            if player_name is not None:
+                logger.info(
+                    "Character %r is not in the declared player_map; dropping the LLM's "
+                    "player_name guess %r (config is authoritative).", name, player_name,
+                )
+            player_name = None
 
         # detail/quote loop -- same shape as LocationsExtractor._build_entry.
         raw_details = raw.get("details", [])
@@ -194,13 +253,26 @@ class CharactersExtractor(BaseExtractor):
                     "Character detail missing a string 'detail'/'quote', ignoring: %r", d
                 )
                 continue
-            q = self._resolve_quote(quote_text, d.get("source_id"), batch)
+            q = self._resolve_quote(quote_text, d.get("source_id"), batch,
+                                    detail_text=detail_text)
             if q is None:
                 # _resolve_quote already logged the specific reason; drop the detail.
                 continue
             details_out.append(Detail(text=detail_text, source_files=[q.source_file]))
             if q not in quotes_out:
                 quotes_out.append(q)
+
+        # Name-collision flag: keep the character (usually a coincidence or a deliberate
+        # joke), but surface it for the later human review step -- this catches a genuine
+        # player/character mix-up the player_name checks can't (a real "Sam" character
+        # with player_name "Sam" passes both). Empty roster auto-handles: ``in set()`` is
+        # False.
+        if name.strip().lower() in self._roster_lookup:
+            logger.warning(
+                "%s Character name %r matches a real person in the roster; keeping it but flagging "
+                "(coincidence/joke, or a player/character mix-up?). is_pc=%r player_name=%r",
+                REVIEW_PREFIX, name, is_pc, player_name,
+            )
 
         try:
             return Character(
