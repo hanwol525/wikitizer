@@ -1,16 +1,14 @@
 """One-off helper to build a NAME-keyed speaker map for imessage-exporter exports.
 
-Sibling of ``scripts/build_speaker_map.py`` (which discovers PHONE numbers in the legacy
-copy-paste logs). imessage-exporter resolves contacts to NAMES, so this discovers the
-distinct sender names instead and builds a ``{sender_name: canonical_name, "exporter":
-you}`` map -- whose VALUES become the anti-conflation roster (``speaker_map.values()``),
-so they should line up with the player keys in ``config/player_map.json``.
+imessage-exporter resolves contacts to NAMES, so this discovers the distinct sender names
+and builds a ``{sender_name: canonical_name, "exporter": you}`` map -- whose VALUES become
+the anti-conflation roster (``speaker_map.values()``), so they should line up with the
+player keys in ``config/player_map.json``.
 
 Run it directly on your exported campaign files, then point the pipeline at the map::
 
-    python scripts/build_imessage_speaker_map.py logs/imessage/*.txt -o config/speaker_map.imessage.json
-    python main.py --files logs/imessage/*.txt --input-format imessage \\
-        --speaker-map config/speaker_map.imessage.json
+    python scripts/build_imessage_speaker_map.py logs/*.txt -o config/speaker_map.imessage.json
+    python main.py --files logs/*.txt --speaker-map config/speaker_map.imessage.json
 
 Flow: ``discover_senders() -> prompt_for_names() -> save()`` -- same shape as the legacy
 script, so it maps cleanly onto a UI later (swap the prompt step for a form).

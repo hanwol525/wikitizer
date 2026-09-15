@@ -1,9 +1,8 @@
 """Tests for parsers/imessage_export_parser.py -- the ReagentX imessage-exporter
-TXT ingestion path.
+TXT ingestion path (the pipeline's only input format).
 
 Fixtures are inline imessage-exporter-format strings written to `tmp_path` (the
-parser reads real files via read_clean). Offline, no API, no PII. The legacy
-copy-paste parser and its tests are untouched (dual input).
+parser reads real files via read_clean). Offline, no API, no PII.
 """
 
 from datetime import datetime
@@ -12,12 +11,21 @@ import pytest
 
 from parsers.imessage_export_parser import (
     parse_imessage_export,
+    read_clean,
     _timestamp_or_none,
     _resolve_sender,
     _strip_annotations,
     _normalize_phone,
     _is_attachment_line,
 )
+
+
+def test_read_clean_strips_all_carriage_returns(tmp_path):
+    # \r\r\n must collapse to one clean break. Plain text-mode reading would turn each
+    # \r\r\n into TWO \n and yield phantom blanks: ["a", "", "b", "", ""].
+    path = tmp_path / "x.txt"
+    path.write_bytes(b"a\r\r\nb\r\r\n")
+    assert read_clean(str(path)) == ["a", "b", ""]
 
 
 SPEAKER_MAP = {"+16303463392": "Sam", "+15551230000": "Matt", "exporter": "Hannah"}

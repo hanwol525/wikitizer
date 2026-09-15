@@ -27,10 +27,9 @@ from tests.fixtures.case import build_message
 def patched_parse(monkeypatch):
     """Canned, non-empty parse output so run() reaches the reconcile stage without
     touching a real file (same shape as test_orchestrator.py's own fixture)."""
-    def fake_parse(filepath, speaker_map, input_format="auto"):
+    def fake_parse(filepath, speaker_map):
         return [build_message("Alice", "Riverton sits on the river Mund.", "group.txt")]
     monkeypatch.setattr(orchestrator, "parse_messages", fake_parse)
-    monkeypatch.setattr(orchestrator, "filter_reactions", lambda msgs: list(msgs))
 
 
 class _BarrierReconciler:

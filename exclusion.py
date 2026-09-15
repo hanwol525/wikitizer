@@ -17,6 +17,11 @@ and ``Alias.source_files``, both tagged at extraction from the entry's file-pure
 batch. So the carve also strips secret-only aliases and, when the canonical name
 isn't provably public, RE-HEADS the entity to its first surviving public alias --
 closing the entity-name leak an earlier review found. See ``_filter_entity``.
+
+The carve also CLEARS ``prose``: the full doc's polished paragraph is written from
+every fact (secret ones included) and the renderer prefers it over ``details``, so
+carrying it through would leak the whole body. The restricted doc re-polishes what
+survived; a failed re-polish just renders the carved details. See ``_filter_entity``.
 """
 
 import logging
@@ -87,6 +92,18 @@ def _filter_entity(entity, excluded):
       * If `name` isn't provably public (no non-excluded entry in `name_sources`, or
         no sources at all), PROMOTE the first surviving alias to be the heading. The
         old secret name is dropped outright, not demoted to an alias.
+      * ALWAYS clear `prose` (see below).
+
+    Clearing `prose` is load-bearing, not tidiness. The prose agent polishes the FULL
+    doc's entities before the carve, so the object reaching here can carry a finished
+    paragraph written from EVERY fact, secret ones included -- and the renderer PREFERS
+    `prose` over `details`. Carrying it through would render the full secret paragraph
+    under a carved entity. The restricted doc re-polishes the carved objects afterwards,
+    so nothing is lost by dropping it, and if that second polish fails or returns no
+    body for an item (an LLM call is allowed to fail; confidentiality is not), the
+    renderer falls back to the carved `details` -- un-polished, never leaky. Same
+    reasoning as the History re-run: the restricted prose is derived only from what
+    survived the carve.
 
     The promotion can't run out of options -- see INVARIANT 2 in the brief: a
     surviving public detail/quote belongs to a member from a public file, and
@@ -134,7 +151,9 @@ def _filter_entity(entity, excluded):
                                      "name_sources": name_sources,
                                      "aliases": kept_aliases,
                                      "details": kept_details,
-                                     "supporting_quotes": kept_quotes})
+                                     "supporting_quotes": kept_quotes,
+                                     # never carry a full-doc paragraph into the carve
+                                     "prose": None})
 
 
 def filter_entities(entities: list, excluded) -> list:

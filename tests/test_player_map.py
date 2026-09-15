@@ -24,24 +24,28 @@ def write(tmp_path, obj):
     return str(p)
 
 
-# --- load_player_map -------------------------------------------------------- #
+# --- load_player_map (now normalizes ANY shape to the canonical LIST form) --- #
 def test_missing_file_returns_empty():
-    assert load_player_map("does/not/exist.json") == {}
+    assert load_player_map("does/not/exist.json") == []
 
 
 def test_loads_and_normalizes(tmp_path):
+    # the old dict form still loads -> one entry per player, main_name first
     path = write(tmp_path, {"Sam": ["Kriggy", "Krigius Krieger"], "Hannah": ["CJ"]})
-    assert load_player_map(path) == {"Sam": ["Kriggy", "Krigius Krieger"], "Hannah": ["CJ"]}
+    assert load_player_map(path) == [
+        {"player": "Sam", "main_name": "Kriggy", "aliases": ["Krigius Krieger"]},
+        {"player": "Hannah", "main_name": "CJ", "aliases": []},
+    ]
 
 
 def test_single_string_value_coerced_to_list(tmp_path):
     path = write(tmp_path, {"Sam": "Kriggy"})
-    assert load_player_map(path) == {"Sam": ["Kriggy"]}
+    assert load_player_map(path) == [{"player": "Sam", "main_name": "Kriggy", "aliases": []}]
 
 
 def test_blank_names_dropped(tmp_path):
     path = write(tmp_path, {"Sam": ["Kriggy", "  ", ""]})
-    assert load_player_map(path) == {"Sam": ["Kriggy"]}
+    assert load_player_map(path) == [{"player": "Sam", "main_name": "Kriggy", "aliases": []}]
 
 
 def test_non_dict_top_level_raises(tmp_path):
@@ -98,8 +102,11 @@ def test_declared_groups_skips_empty():
     assert declared_groups({"Sam": [], "Hannah": ["CJ"]}) == [["cj"]]
 
 
-# --- save_player_map round-trip --------------------------------------------- #
+# --- save_player_map round-trip (writes the canonical LIST form) ------------- #
 def test_save_round_trip(tmp_path):
     path = str(tmp_path / "out.json")
-    save_player_map({"Sam": ["Kriggy"], "Colin": "Aerin"}, path)   # value coerced on save
-    assert load_player_map(path) == {"Sam": ["Kriggy"], "Colin": ["Aerin"]}
+    save_player_map({"Sam": ["Kriggy"], "Colin": "Aerin"}, path)   # old dict form coerced on save
+    assert load_player_map(path) == [
+        {"player": "Sam", "main_name": "Kriggy", "last_name": None, "aliases": [], "pronouns": []},
+        {"player": "Colin", "main_name": "Aerin", "last_name": None, "aliases": [], "pronouns": []},
+    ]

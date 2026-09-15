@@ -50,11 +50,12 @@ REVIEW_PREFIX = "[REVIEW]"
 # --------------------------------------------------------------------------- #
 ENTITY_PROSE_PROMPT = """You are a copyeditor for a fictional-world wiki (a D&D campaign). You turn terse extracted facts about ONE entity into a clean, readable prose body. You do NOT classify, invent, add, or reinterpret anything.
 
-INPUT: a JSON object with "items": a JSON array; each item is one entity: {"id": <int>, "name": "<entity name>", "facts": ["<fact fragment>", ...]}.
+INPUT: a JSON object with "items": a JSON array; each item is one entity: {"id": <int>, "name": "<entity name>", "facts": ["<fact fragment>", ...]}. An item MAY also carry "pronouns": ["<subject>", "<object>", ...] — this entity's correct pronouns.
 
 For EACH item, write a clean prose body (one short paragraph) that:
 - Uses ONLY the facts given. Invent NOTHING — no new names, dates, numbers, places, or relationships.
-- You may ONLY do these three things: merge duplicate or near-duplicate restatements of the SAME fact into one clean statement, smooth the flow between facts, and fix punctuation and capitalization. That is the whole job.
+- You may ONLY do these four things: merge duplicate or near-duplicate restatements of the SAME fact into one clean statement, smooth the flow between facts, fix punctuation and capitalization, and (only if the item lists "pronouns") correct this entity's pronouns. That is the whole job.
+- If an item lists "pronouns", use EXACTLY those pronouns for THIS entity throughout the body — rewrite any pronoun in the facts that refers to this entity so it matches (e.g. "she"→"they"). Change ONLY the pronoun words that refer to this entity; keep every fact, its subject, and any OTHER person's pronouns exactly as given. If an item lists no pronouns, leave all pronouns as they are.
 - KEEP each fact's original subject and its stated relationships EXACTLY as given. NEVER change who the subject of a statement is, NEVER swap who did what to whom, and NEVER infer, add, reassign, or invent a relationship (who is whose family, ally, ruler, servant, guard, etc.). If a fact is stated in the first person ("I", "my", "we"), keep its stated subject — do not guess a different person for it.
 - Include EVERY distinct fact; drop nothing. If two facts differ at all, keep both.
 - Read as encyclopedic prose. Do NOT restate the entity's own name as a title, do NOT add a heading, and do NOT quote — the verbatim source quotes are attached elsewhere as footnotes.
@@ -142,26 +143,54 @@ def _compile_deconflation(deconflation_map):
     return re.compile(r"(?<!\w)(?:" + alt + r")(?!\w)", re.IGNORECASE)
 
 
-def _deconflate_text(text, pattern, deconflation_map):
+def _compile_char_collapse(deconflation_map):
+    """Compile a pattern that strips the REDUNDANT possessive de-conflation leaves behind:
+    once "Sam's character" becomes "Krigius Krieger's character", the "'s character" is
+    noise (the source only said "'s character" because "Sam" was a PLAYER). Matches
+    "<CharacterName>'s character|PC" and keeps just the name. None for an empty map.
+    Names are sorted longest-first so a longer name wins over a shorter prefix."""
+    names = sorted({v for v in deconflation_map.values() if v and v.strip()},
+                   key=len, reverse=True)
+    if not names:
+        return None
+    alt = "|".join(re.escape(n) for n in names)
+    return re.compile(r"(?<!\w)(" + alt + r")'s\s+(?:character|pc)\b", re.IGNORECASE)
+
+
+def _deconflate_text(text, pattern, deconflation_map, collapse_pattern=None):
     if not text or pattern is None:
         return text
     # A match's lowercase form is always a key (the pattern is built from the lowercased
     # keys with IGNORECASE), so the lookup can't KeyError.
-    return pattern.sub(lambda m: deconflation_map[m.group(0).lower()], text)
+    text = pattern.sub(lambda m: deconflation_map[m.group(0).lower()], text)
+    # ...then collapse any "<Character>'s character" the substitution just made redundant.
+    if collapse_pattern is not None:
+        text = collapse_pattern.sub(r"\1", text)
+    return text
 
 
 def deconflate_entities(entities, deconflation_map) -> list:
-    """Return new entities with player-name tokens in each `details[].text` replaced by
-    the character name. Quotes, aliases, name_sources, and the entity's own name are
-    left verbatim (footnotes/provenance stay exact). Empty map -> passthrough."""
+    """Return new entities with player-name tokens replaced by the character name in each
+    `details[].text`, the entity's `name`, AND its `aliases[].text` -- so a synthesized
+    label like "Conrad's companion" renders as "CJ's companion" and a leaked player-name
+    alias is fixed too. Quotes and name_sources stay verbatim (footnotes/provenance exact).
+    render_wiki rebuilds anchors + crosslinks from the final names, so renaming stays
+    internally consistent. Empty map -> passthrough."""
     pattern = _compile_deconflation(deconflation_map)
     if pattern is None:
         return list(entities)
+    collapse = _compile_char_collapse(deconflation_map)
     out = []
     for e in entities:
-        new_details = [d.model_copy(update={"text": _deconflate_text(d.text, pattern, deconflation_map)})
+        new_details = [d.model_copy(update={"text": _deconflate_text(d.text, pattern, deconflation_map, collapse)})
                        for d in e.details]
-        out.append(e.model_copy(update={"details": new_details}))
+        new_aliases = [a.model_copy(update={"text": _deconflate_text(a.text, pattern, deconflation_map, collapse)})
+                       for a in e.aliases]
+        out.append(e.model_copy(update={
+            "name": _deconflate_text(e.name, pattern, deconflation_map, collapse),
+            "details": new_details,
+            "aliases": new_aliases,
+        }))
     return out
 
 
@@ -173,9 +202,10 @@ def deconflate_events(events, deconflation_map) -> list:
     pattern = _compile_deconflation(deconflation_map)
     if pattern is None:
         return list(events)
+    collapse = _compile_char_collapse(deconflation_map)
     return [e.model_copy(update={
-        "description": _deconflate_text(e.description, pattern, deconflation_map),
-        "name": _deconflate_text(e.name, pattern, deconflation_map),
+        "description": _deconflate_text(e.description, pattern, deconflation_map, collapse),
+        "name": _deconflate_text(e.name, pattern, deconflation_map, collapse),
     }) for e in events]
 
 
@@ -207,9 +237,17 @@ class ProseAgent(BaseAgent):
         out = []
         for start in range(0, len(entities), self.batch_size):
             chunk = entities[start:start + self.batch_size]
-            payload = {"items": [{"id": i, "name": e.name,
-                                  "facts": [d.text for d in e.details]}
-                                 for i, e in enumerate(chunk)]}
+
+            def _item(i, e):
+                # pronouns only for a declared Character (others don't carry the field);
+                # omit the key when empty so the payload/prompt stays minimal for NPCs + non-chars.
+                it = {"id": i, "name": e.name, "facts": [d.text for d in e.details]}
+                pron = getattr(e, "pronouns", None)
+                if pron:
+                    it["pronouns"] = list(pron)
+                return it
+
+            payload = {"items": [_item(i, e) for i, e in enumerate(chunk)]}
             bodies = self._polish_call(ENTITY_PROSE_PROMPT, payload, len(chunk))
             for i, e in enumerate(chunk):
                 body = bodies.get(i)

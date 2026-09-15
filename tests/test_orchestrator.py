@@ -11,8 +11,8 @@ suite offline: no network, no API key, no `integration` marker.
 Two isolation seams are used on purpose:
   * `_build_agents` is overridden (the brief's seam) to swap in stub agents.
   * The pure parse+filter step lives directly in `run()` (not in an agent), so a
-    `monkeypatch` fixture replaces `orchestrator.parse_messages` /
-    `orchestrator.filter_reactions` with canned message output -- fully isolating
+    `monkeypatch` fixture replaces `orchestrator.parse_messages` with canned
+    message output -- fully isolating
     the orchestrator from the Phase 2 parser's file format. ONE additive test
     (`test_run_over_a_real_parsed_log`) skips that monkeypatch and feeds a real
     minimal log file instead, to lock down the real parse wiring (arg order).
@@ -133,6 +133,10 @@ class _StubReconciler:
             raise RuntimeError("boom: reconcile")
         return list(entries)
 
+    def resolve_cross_type(self, by_type):
+        # Pass-through (the real one runs an LLM arbiter); enough to test the wiring.
+        return by_type
+
     def order_history(self, events, current_year=None):
         self.order_called = True
         self.order_current_year = current_year   # captured so a test can assert threading
@@ -213,21 +217,19 @@ class _StubbedOrchestrator(Orchestrator):
 def patched_parse(monkeypatch):
     """Replace the pure parse+filter step so run() gets a canned, non-empty message
     list without any real file. Isolates the orchestrator from the parser format."""
-    def fake_parse(filepath, speaker_map, input_format="auto"):
+    def fake_parse(filepath, speaker_map):
         return [build_message("Alice", "Riverton sits on the river Mund.", "group.txt")]
     monkeypatch.setattr(orchestrator, "parse_messages", fake_parse)
-    monkeypatch.setattr(orchestrator, "filter_reactions", lambda msgs: list(msgs))
 
 
 @pytest.fixture
 def patched_parse_multi(monkeypatch):
     """Like patched_parse, but tags each message with its file's BARE name, so a
     multi-file `files` list yields multi-source messages (what exclusion needs)."""
-    def fake_parse(filepath, speaker_map, input_format="auto"):
+    def fake_parse(filepath, speaker_map):
         name = Path(filepath).name
         return [build_message("Alice", f"Content from {name}.", name)]
     monkeypatch.setattr(orchestrator, "parse_messages", fake_parse)
-    monkeypatch.setattr(orchestrator, "filter_reactions", lambda msgs: list(msgs))
 
 
 # --- 1. happy path ---------------------------------------------------------- #
@@ -354,22 +356,18 @@ def test_shared_client_threads_into_every_agent():
 # --- additive: real parse wiring (no monkeypatch) --------------------------- #
 
 def test_run_over_a_real_parsed_log(tmp_path, caplog):
-    """Additive hardening beyond the brief's 8 groups: skip the parse monkeypatch
-    and feed a REAL minimal group log, so the parse_messages -> (auto-detect ->
-    parse_chat_log) arg order and the filter_reactions wiring are exercised for real
-    (a swapped-arg regression the monkeypatched tests would mask). The legacy format
-    is auto-detected from its dashes row. Stubs still handle the agent layer."""
+    """Additive hardening beyond the brief's 8 groups: skip the parse monkeypatch and
+    feed a REAL minimal imessage-exporter log, so the real `parse_messages` arg order is
+    exercised (a swapped-arg regression the monkeypatched tests would mask). Stubs still
+    handle the agent layer."""
     caplog.set_level(logging.INFO)
     log = tmp_path / "group.txt"
-    # Minimal but valid group export: participant header (leads with a comma), the
-    # dashes row, a leading lone timestamp to seed the first message cleanly, one
-    # body line, then a complete phone footer that names the sender.
+    # Minimal but valid imessage-exporter export: a timestamp line, a sender line, then
+    # the body -- the two-line handshake the parser keys on.
     log.write_text(
-        ",+15551230000\n"
-        "----------------------------------------\n"
-        "01/01/2024 12:00:00\n"
-        "Riverton sits on the river Mund.\n"
-        "+15551230000 01/01/2024 12:00:05\n",
+        "May 17, 2022  5:29:42 PM\n"
+        "+15551230000\n"
+        "Riverton sits on the river Mund.\n",
         encoding="utf-8",
     )
     noise = _StubNoise()
@@ -599,6 +597,86 @@ def test_prose_degrades_to_unpolished_on_failure(patched_parse, caplog):
     assert "A river town." in out                        # fell back to the joined details
     assert any("[REVIEW]" in r.getMessage() and "prose" in r.getMessage().lower()
                for r in caplog.records)
+
+
+class _FactsProse:
+    """A prose stub close enough to the real agent to catch the stale-prose leak: it
+    writes each body FROM THE FACTS IT IS GIVEN, and -- mirroring the real prompt's
+    "if an item has no facts, return an empty string" rule plus polish_entities'
+    falsy-body branch -- returns a factless item UNCHANGED. `fail_after_first_doc`
+    makes every call past the first document raise, which is the wider trigger: any
+    transient failure on a restricted prose call.
+
+    Both variants used to leak, because the carved entities still carried the FULL
+    doc's polished paragraph (written from the secret facts too) and the renderer
+    prefers `prose` over `details`. The carve now clears it.
+    """
+
+    NOUN_CALLS_PER_DOC = 5   # locations / characters / organizations / items / people
+
+    def __init__(self, fail_after_first_doc=False):
+        self.fail_after_first_doc = fail_after_first_doc
+        self.entity_calls = 0
+        self.event_calls = 0
+
+    def polish_entities(self, entities):
+        self.entity_calls += 1
+        if self.fail_after_first_doc and self.entity_calls > self.NOUN_CALLS_PER_DOC:
+            raise RuntimeError("boom: restricted prose")
+        out = []
+        for e in entities:
+            if not e.details:          # nothing to polish -> left un-polished
+                out.append(e)
+                continue
+            out.append(e.model_copy(update={"prose": " ".join(d.text for d in e.details)}))
+        return out
+
+    def polish_events(self, events):
+        self.event_calls += 1
+        if self.fail_after_first_doc and self.event_calls > 1:
+            raise RuntimeError("boom: restricted prose")
+        return [e.model_copy(update={"prose": e.description}) for e in events]
+
+
+def test_restricted_doc_never_reuses_full_doc_prose_for_a_factless_carved_entity(
+        patched_parse_multi):
+    # DETERMINISTIC leak path: every fact is secret but a PUBLIC quote keeps the entity
+    # alive, so the restricted polish is handed an item with no facts and correctly
+    # writes nothing -- and the stale full-doc paragraph would render in its place.
+    secret_bodied = Character(
+        name="Gandalf", name_sources=["group.txt"],
+        details=[det("Is secretly the Maia Olorin.", "secret.txt")],
+        supporting_quotes=[q("Gandalf wanders the wilds", "group.txt")],
+    )
+    orch = _StubbedOrchestrator(_StubNoise(),
+                                _extractors(characters=_StubExtractor([secret_bodied])),
+                                _StubReconciler(), prose=_FactsProse())
+    result = orch.run(["logs/group.txt", "logs/secret.txt"], _config(),
+                      exclude_sources=["secret.txt"])
+    assert "secretly the Maia Olorin" in result.full        # the polished full body has it
+    assert "Gandalf" in result.restricted                   # entity survives on its quote
+    assert "secretly the Maia Olorin" not in result.restricted
+
+
+def test_restricted_doc_never_reuses_full_doc_prose_when_its_polish_fails(patched_parse_multi):
+    # The WIDER trigger: one transient failure on any restricted prose call degrades the
+    # whole stage to the pre-polish objects. Those must be the CARVED ones with no prose,
+    # so the fallback body is the public details -- less polished, never leaky.
+    mixed = Character(
+        name="Gandalf", name_sources=["group.txt"],
+        details=[det("A wandering wizard.", "group.txt"),
+                 det("Is secretly the Maia Olorin.", "secret.txt")],
+        supporting_quotes=[q("Gandalf wanders the wilds", "group.txt")],
+    )
+    prose = _FactsProse(fail_after_first_doc=True)
+    orch = _StubbedOrchestrator(_StubNoise(),
+                                _extractors(characters=_StubExtractor([mixed])),
+                                _StubReconciler(), prose=prose)
+    result = orch.run(["logs/group.txt", "logs/secret.txt"], _config(),
+                      exclude_sources=["secret.txt"])
+    assert "secretly the Maia Olorin" in result.full
+    assert "A wandering wizard." in result.restricted       # fell back to the carved facts
+    assert "secretly the Maia Olorin" not in result.restricted
 
 
 def test_prose_runs_on_both_full_and_restricted(patched_parse_multi):

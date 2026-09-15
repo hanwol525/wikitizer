@@ -12,11 +12,13 @@ The restricted copy's path is DERIVED from --output (see restricted_path), so th
 two docs always land together. SPEAKER_MAP_PATH / CROSSLINK_WORDS_PATH / PLAYER_MAP_PATH
 stay module constants on purpose: they're per-install config, not per-run knobs.
 
---confirm-players builds/updates the declared party (config/player_map.json) from the
-characters discovered in a run; the saved party takes effect on the NEXT run.
+--confirm-players builds/updates the declared party from the characters discovered in a
+run, writing back to the file it read (--player-map); the saved party takes effect on the
+NEXT run.
 """
 
 import argparse
+import json
 import logging
 from pathlib import Path
 
@@ -25,7 +27,7 @@ from dotenv import load_dotenv
 from orchestrator import Orchestrator, PipelineConfig
 from speaker_map import load_speaker_map
 from renderer.crosslink import load_crosslink_words
-from player_map import load_player_map, save_player_map
+from player_map import declared_characters, load_player_map, save_player_map
 
 DEFAULT_OUTPUT_PATH = "output/wiki.md"   # output/ is gitignored -- a real-log wiki carries PII
 
@@ -72,21 +74,13 @@ def parse_args(argv=None):
     parser.add_argument(
         "--speaker-map", default=SPEAKER_MAP_PATH, metavar="PATH",
         help="Path to the speaker map JSON (default: %(default)s). Override to run a "
-             "different setup without touching the default -- e.g. a name-keyed "
-             "config/speaker_map.imessage.json for an imessage-exporter run alongside "
-             "your phone-keyed legacy map.",
+             "different setup without touching the default (built by "
+             "scripts/build_imessage_speaker_map.py).",
     )
     parser.add_argument(
         "--player-map", default=PLAYER_MAP_PATH, metavar="PATH",
         help="Path to the declared-party JSON (default: %(default)s). Override to point "
              "at a different party file (same reason as --speaker-map).",
-    )
-    parser.add_argument(
-        "--input-format", choices=["auto", "imessage", "legacy"], default="auto",
-        help="Chat-log format of --files: 'imessage' (a structured imessage-exporter "
-             "TXT export), 'legacy' (the copy-pasted iMessage .txt), or 'auto' "
-             "(default: sniff each file). The two are trivially distinguishable, so "
-             "'auto' is right for almost everyone.",
     )
     parser.add_argument(
         "--current-year", type=int, default=None, metavar="YEAR",
@@ -106,10 +100,16 @@ def parse_args(argv=None):
     parser.add_argument(
         "--confirm-players", action="store_true",
         help="After the run, interactively confirm/correct which real person plays each "
-             "discovered character, and save the answers to config/player_map.json. Who "
+             "discovered character, and save the answers back to --player-map. Who "
              "plays a character can't be inferred reliably, so this is how you declare it. "
              "The saved party takes effect on the NEXT run (it drives extraction + merge). "
              "Off by default (a normal run is non-interactive).",
+    )
+    parser.add_argument(
+        "--no-player-map", action="store_true",
+        help="Run WITHOUT a declared party. The player map is normally REQUIRED (build it "
+             "with scripts/build_player_map.py); this is a deliberate opt-out for a "
+             "party-less/test run, and PCs may then duplicate or be mis-attributed.",
     )
     args = parser.parse_args(argv)
     # Fail cheap: an existing-directory --output would only blow up at write_text time,
@@ -141,24 +141,72 @@ def restricted_path(output) -> Path:
     return p.with_name(p.stem + "_restricted" + p.suffix)
 
 
-def confirm_player_map(pcs, existing, input_fn=input, print_fn=print) -> dict:
-    """Interactively confirm/correct the player of each discovered PC and return an
-    updated ``{player: [character name, alias, ...]}`` map (merged with ``existing``).
+def confirm_player_map(pcs, existing, input_fn=input, print_fn=print) -> list:
+    """Interactively confirm/correct the player of each discovered PC and return the
+    updated declared party in the CANONICAL LIST form -- one entry per CHARACTER,
+    ``{"player", "main_name", "last_name", "aliases", "pronouns"}`` -- merged with
+    ``existing``.
+
+    One entry per CHARACTER, not the old ``{player: [names]}`` bag, because that shape
+    was LOSSY on every round-trip: a player's second PC silently became an alias of the
+    first, and ``last_name``/``pronouns`` were dropped for EVERY entry. The pronoun loss
+    was the worst of it -- the loader defaults missing pronouns to they/them and the
+    prose pass then actively rewrites that character's pronouns on the next run. So this
+    path now preserves whatever ``scripts/build_player_map.py`` built and only edits the
+    one thing it asks about: who plays each character.
 
     Pure except for the injected ``input_fn``/``print_fn`` (defaults to builtins), so it
     unit-tests without real stdin. Per character: Enter keeps its current player, a typed
-    name (re)assigns it, ``-`` skips it. A reassigned character's names are moved off any
-    previous player so the map can't hold the same name under two people.
-    """
-    result = {p: list(names) for p, names in existing.items()}
+    name (re)assigns it, ``-`` skips it. A discovered PC is matched to an existing entry
+    by that entry's RECOGNITION names (so "Kriggy Krieger" finds the Kriggy/Krieger entry),
+    and then only its ``player`` and ``aliases`` are touched -- the declared ``main_name``
+    stays the heading and ``last_name``/``pronouns`` ride through untouched. A PC matching
+    no entry becomes a new one. A reassignment also detaches those names from every OTHER
+    entry, so the party can never hold one name under two people.
 
-    def _remove(names_lower):
-        for p in list(result):
-            result[p] = [n for n in result[p] if n.strip().lower() not in names_lower]
+    ``existing`` may be the canonical list or any of the old dict forms -- both normalize
+    through ``declared_characters``.
+    """
+    entries = [
+        {"player": dc.player, "main_name": dc.main_name, "last_name": dc.last_name,
+         "aliases": list(dc.aliases), "pronouns": list(dc.pronouns)}
+        for dc in declared_characters(existing)
+    ]
+
+    def _recognition(entry):
+        # The cross-product ({main_name} U aliases) x {"", last_name}. Computed through
+        # declared_characters so the matching here can never drift from the matching the
+        # extractor/reconciler do -- one implementation, in player_map.
+        return set(declared_characters([entry])[0].recognition)
+
+    def _find(names_lower):
+        for entry in entries:
+            if names_lower & _recognition(entry):
+                return entry
+        return None
+
+    def _detach(keep, names_lower):
+        """Drop `names_lower` from every OTHER entry so a reassignment can't leave one
+        character under two players. An other entry whose own `main_name` is one of these
+        names IS this character declared twice (a hand-edited config), so it goes away --
+        but `keep` inherits its `last_name` when it has none, so the collapse can't lose
+        a recognition form. Pronouns aren't inherited: the loader has already defaulted
+        an absent list to they/them, so 'absent' isn't distinguishable here."""
+        survivors = []
+        for e in entries:
+            if e is keep:
+                survivors.append(e)
+                continue
+            if e["main_name"].strip().lower() in names_lower:
+                keep["last_name"] = keep["last_name"] or e["last_name"]
+                continue
+            e["aliases"] = [a for a in e["aliases"] if a.strip().lower() not in names_lower]
+            survivors.append(e)
+        entries[:] = survivors
 
     if not pcs:
         print_fn("No player characters were discovered in this run; nothing to confirm.")
-        return result
+        return entries
 
     print_fn("Confirm who plays each character (Enter = keep, type a name to set, '-' = skip):")
     for c in pcs:
@@ -171,16 +219,29 @@ def confirm_player_map(pcs, existing, input_fn=input, print_fn=print) -> dict:
         player = answer if answer else c.player_name
         if not player:
             continue                       # blank + no current player -> nothing to assign
-        names = [c.name] + aliases
-        _remove({n.strip().lower() for n in names})   # reassignment: drop from any old player
-        result.setdefault(player, [])
-        have = {x.strip().lower() for x in result[player]}
-        for n in names:
-            if n.strip().lower() not in have:
-                result[player].append(n)
-                have.add(n.strip().lower())
+        names = [n for n in [c.name, *aliases] if n and n.strip()]
+        if not names:
+            continue
+        names_lower = {n.strip().lower() for n in names}
 
-    return {p: names for p, names in result.items() if names}   # drop now-empty players
+        entry = _find(names_lower)
+        if entry is None:
+            # A newly discovered character: its extraction-time pronouns are the best
+            # starting point (empty -> the loader defaults them to they/them).
+            entry = {"player": player, "main_name": names[0], "last_name": None,
+                     "aliases": [], "pronouns": list(getattr(c, "pronouns", None) or [])}
+            entries.append(entry)
+        else:
+            entry["player"] = player       # the ONLY field the confirmation rewrites
+
+        known = _recognition(entry)
+        for n in names:                    # fold in any name the entry doesn't know yet
+            if n.strip().lower() not in known:
+                entry["aliases"].append(n)
+                known.add(n.strip().lower())
+        _detach(entry, names_lower)
+
+    return [e for e in entries if e["main_name"].strip()]
 
 
 def main(argv=None) -> None:
@@ -197,30 +258,51 @@ def main(argv=None) -> None:
     # Pull .env into the environment so the Anthropic SDK finds ANTHROPIC_API_KEY.
     load_dotenv()
 
-    # Load BOTH config files up front. If either is missing/malformed this raises
-    # HERE -- before any paid LLM call -- which is exactly what we want (fail cheap).
+    # Load the config files up front -- before any paid LLM call (fail cheap). A missing /
+    # malformed file becomes a friendly, actionable SystemExit, NOT a raw traceback.
+    try:
+        speaker_map = load_speaker_map(args.speaker_map)
+    except FileNotFoundError:
+        raise SystemExit(
+            f"Speaker map not found: {args.speaker_map}\n"
+            f"Build it first:\n"
+            f"    python scripts/build_imessage_speaker_map.py logs/*.txt\n"
+            f"Or point --speaker-map at yours, e.g. "
+            f"--speaker-map config/speaker_map.imessage.json"
+        )
+    except json.JSONDecodeError as exc:
+        raise SystemExit(f"Speaker map {args.speaker_map} is not valid JSON: {exc}")
+    try:
+        # The declared party (gitignored). Missing -> [] (the gate below decides); a
+        # malformed shape raises ValueError -> a friendly rebuild hint here.
+        player_map = load_player_map(args.player_map)
+    except ValueError as exc:
+        raise SystemExit(f"Player map {args.player_map} is malformed: {exc}\n"
+                         f"Rebuild it: python scripts/build_player_map.py")
+
     config = PipelineConfig(
-        speaker_map=load_speaker_map(args.speaker_map),
+        speaker_map=speaker_map,
         crosslink_words=load_crosslink_words(CROSSLINK_WORDS_PATH),
         current_year=args.current_year,
-        # The declared party (gitignored, may be absent -> {}). Assigns player_name
-        # authoritatively and merges each player's declared aliases as one character.
-        player_map=load_player_map(args.player_map),
-        input_format=args.input_format,
+        player_map=player_map,
     )
 
-    # Player/character disambiguation is only as good as the declared party. With no
-    # config/player_map.json, the LLM's player guesses are un-anchored -- Sam/Kriggy-style
-    # conflations and duplicate PC pages become far more likely. Warn LOUDLY (but do not
-    # abort: a fresh clone / the synthetic path can still run) so the user knows to create
-    # it. This is the soft "requirement": when the map IS present it is the source of truth
-    # (the extractor drops any LLM player guess for an undeclared character).
+    # Player/character disambiguation is only as good as the declared party, so the map is a
+    # HARD, step-1 requirement -- refuse to run without it (before any paid call), unless the
+    # user consciously opts out with --no-player-map. When the map IS present it's the source
+    # of truth (the extractor drops any LLM player guess for an undeclared character).
+    if not config.player_map and not args.no_player_map:
+        raise SystemExit(
+            f"No declared party found ({args.player_map} is missing or empty).\n"
+            f"Build it first:\n"
+            f"    python scripts/build_imessage_speaker_map.py logs/*.txt\n"
+            f"    python scripts/build_player_map.py\n"
+            f"Or pass --no-player-map to run without one (PCs may duplicate or be mis-attributed)."
+        )
     if not config.player_map:
         logging.getLogger(__name__).warning(
-            "[REVIEW] No player_map configured (%s is missing or empty); character/player "
-            "disambiguation is disabled and PCs may duplicate or be mis-attributed. Create "
-            "it (see --confirm-players) to make the declared party the source of truth.",
-            PLAYER_MAP_PATH,
+            "[REVIEW] Running with NO declared party (--no-player-map); character/player "
+            "disambiguation is disabled and PCs may duplicate or be mis-attributed.",
         )
 
     # A bad --exclude-sources name raises ValueError from inside run(), before any
@@ -256,8 +338,11 @@ def main(argv=None) -> None:
     # already happened this run) -- said plainly so the unchanged output isn't a surprise.
     if args.confirm_players:
         updated = confirm_player_map(output.characters, config.player_map)
-        save_player_map(updated, PLAYER_MAP_PATH)
-        log.info("Saved the declared party to %s -- re-run to apply it.", PLAYER_MAP_PATH)
+        # Write back to the file we READ (args.player_map), not the module default --
+        # saving to the default would clobber the standard party with answers built from
+        # a different one whenever --player-map is used.
+        save_player_map(updated, args.player_map)
+        log.info("Saved the declared party to %s -- re-run to apply it.", args.player_map)
 
 
 if __name__ == "__main__":

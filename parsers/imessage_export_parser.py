@@ -1,8 +1,8 @@
-"""Ingestion path for ReagentX **imessage-exporter** TXT exports.
+"""Ingestion path for ReagentX **imessage-exporter** TXT exports -- the pipeline's only
+input format.
 
-The legacy `chat_parser` handles the messy copy-pasted iMessage `.txt` (footer
-regexes + left/right alignment guessing). This module handles the *structured*
-TXT that the `imessage-exporter` CLI (`-f txt`) writes, where every message is::
+This module handles the *structured* TXT that the `imessage-exporter` CLI (`-f txt`)
+writes, where every message is::
 
     May 17, 2022  5:29:42 PM        <- timestamp line (the message boundary)
     Me                              <- sender line ("Me" = the exporter, else a handle/name)
@@ -11,13 +11,12 @@ TXT that the `imessage-exporter` CLI (`-f txt`) writes, where every message is::
         Loved by Sam
                                     <- blank line separates messages
 
-The big win over the legacy parser is a DETERMINISTIC per-message sender (its own
-line), so there is no alignment heuristic. Reactions, attachments, replies, read
-receipts, and group announcements are all STRUCTURALLY annotated, so we strip them
-here rather than pattern-matching curly-quote reaction text downstream.
+The structured format gives a DETERMINISTIC per-message sender (its own line), so there
+is no alignment heuristic. Reactions, attachments, replies, read receipts, and group
+announcements are all STRUCTURALLY annotated, so we strip them here -- there is nothing
+reaction-shaped left to filter downstream.
 
-Output is the same `list[Message]` seam every parser produces, so the orchestrator
-loop is unchanged (it routes here via `parsers/ingest.py`).
+Output is a `list[Message]`, the seam the orchestrator consumes (via `parsers/ingest.py`).
 
 The format is CONFIRMED against a real export. Two findings the templates alone didn't
 show: a **read receipt is appended to the timestamp line** in parentheses
@@ -35,9 +34,26 @@ from datetime import datetime
 from pathlib import Path
 
 from models.message import Message
-from parsers.chat_parser import read_clean, _clean_body
 
 logger = logging.getLogger(__name__)
+
+
+def read_clean(path: str) -> list:
+    """Read a log as UTF-8 raw bytes and strip ALL carriage returns.
+
+    Never use a text-mode read here: universal-newline handling turns each ``\\r\\r\\n``
+    into two ``\\n``, giving a phantom blank line after every real line. UTF-8 matters too
+    (accented names, curly quotes, emoji).
+    """
+    with open(path, "rb") as f:
+        raw = f.read().decode("utf-8")
+    return raw.replace("\r", "").split("\n")
+
+
+def _clean_body(buffer: list) -> str:
+    """Strip each line (leading indent + trailing space are noise once used), keep internal
+    blank lines as paragraph breaks, then trim leading/trailing blank lines off the message."""
+    return "\n".join(line.strip() for line in buffer).strip()
 
 # A message boundary: the timestamp line, e.g. "May 17, 2022  5:29:42 PM".
 # imessage-exporter prints it with a NON-abbreviated day/hour (no leading zero), so a

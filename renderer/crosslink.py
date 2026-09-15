@@ -42,6 +42,8 @@ import unicodedata
 from dataclasses import dataclass, field
 from typing import Optional
 
+from text_norm import slug as _slug
+
 logger = logging.getLogger(__name__)
 
 # Same convention as agents/reconciler.py: every loud, human-actionable flag
@@ -140,25 +142,13 @@ def slugify(name: str) -> str:
     FALLBACK (a deterministic ``entity-<N>`` id) lives in `build_crosslink_map`, not
     here, because only the map knows the entity's stable index -- this function is a
     pure string -> string transform with no notion of "which entity".
+
+    The transform itself lives in ``text_norm.slug`` -- the SINGLE source of truth the
+    reconciler's merge-grouping key also delegates to, so the anchor and the merge
+    bucket can never disagree about which names are "the same" (a "Scoia'tael"-style
+    split that produced duplicate pages + dead links before they were unified).
     """
-    # 1. ASCII-fold: decompose so accents become separate combining marks we can
-    #    drop, then keep only the plain-ASCII skeleton.
-    decomposed = unicodedata.normalize("NFKD", name)
-    ascii_only = "".join(
-        ch for ch in decomposed
-        if not unicodedata.combining(ch) and ord(ch) < 128
-    )
-    # 2 + 3. Lowercase, then every whitespace run becomes a single hyphen (the
-    #        multi-space collapse falls out of step 5 anyway, but doing it here
-    #        keeps the intent obvious).
-    lowered = ascii_only.lower()
-    hyphenated = re.sub(r"\s+", "-", lowered)
-    # 4. Drop everything that isn't a slug char. Internal hyphens survive; an
-    #    apostrophe "Mal'taav" just closes up to "maltaav" (NOT "mal-taav") so a
-    #    name and its apostrophe-free spelling slug the same.
-    kept = re.sub(r"[^a-z0-9-]", "", hyphenated)
-    # 5. Collapse hyphen runs and trim the edges.
-    return re.sub(r"-+", "-", kept).strip("-")
+    return _slug(name)
 
 
 def _split_article(surface: str) -> str:
@@ -345,6 +335,27 @@ def load_crosslink_words(path: str = DEFAULT_WORDS_PATH) -> dict:
     }
 
 
+def _dual_canonical_anchor(anchor_set: set, anchor_kind: dict) -> Optional[str]:
+    """If a surface is claimed by the anchors of ONE real entity captured as both a
+    Location AND the Organization that governs it (a realm -- the one legit cross-type
+    dual), return the canonical anchor to route the shared surface to: the Location
+    member, mirroring the reconciler's locations-over-organizations cross-type tiebreak.
+    This keeps the realm LINKABLE instead of dropping every mention as ambiguous.
+
+    The discriminator is the KINDS: EXACTLY {Location, Organization}, both present and
+    nothing else. That covers both an identical-name dual ("Krieger Imperium"/"Krieger
+    Imperium") and an article-differing one ("Citadel" the place / "The Citadel" the org)
+    -- they already share ONE article-stripped surface here, so the anchors differing by
+    a "the-" prefix is irrelevant. Returns None for a genuinely ambiguous surface -- two
+    unrelated same-named entities of ONE type (kinds == {Location}), or any collision
+    touching a kind outside the realm dual (a same-named Character kept separate on a
+    player clash, an Item, an event) -- which the caller then drops as before."""
+    kinds = {anchor_kind.get(a) for a in anchor_set}
+    if kinds == {"Location", "Organization"}:
+        return min(a for a in anchor_set if anchor_kind.get(a) == "Location")
+    return None
+
+
 def build_crosslink_map(noun_entities: list, events: Optional[list] = None, common_words: Optional[dict] = None) -> CrosslinkMap:
     """Build the resolved `CrosslinkMap` over the five NOUN types (`Location`,
     `Character`, `Organization`, `Item`, `PeopleAndCultures`) plus, optionally, the
@@ -375,6 +386,7 @@ def build_crosslink_map(noun_entities: list, events: Optional[list] = None, comm
     # sentence-ish name still has a valid target even though it won't be a source.
     entity_anchors = []
     anchors = {}            # entity name -> anchor (first occurrence wins)
+    anchor_kind = {}        # anchor -> entity class name (for the realm-dual carve-out)
     used_anchors = set()
     for i, ent in enumerate(noun_entities):
         base = slugify(ent.name)
@@ -400,6 +412,7 @@ def build_crosslink_map(noun_entities: list, events: Optional[list] = None, comm
                            REVIEW_PREFIX, base, ent.name, anchor)
         used_anchors.add(anchor)
         entity_anchors.append(anchor)
+        anchor_kind[anchor] = type(ent).__name__
         if ent.name not in anchors:
             anchors[ent.name] = anchor
         else:
@@ -448,6 +461,7 @@ def build_crosslink_map(noun_entities: list, events: Optional[list] = None, comm
                            REVIEW_PREFIX, base, ev.name, anchor)
         used_anchors.add(anchor)
         event_anchors.append(anchor)
+        anchor_kind[anchor] = type(ev).__name__
 
     # --- Pass 2: gather surface-form CLAIMS (name claims and alias claims). --- #
     # A claim is "surface form S points at anchor A". We track names and aliases
@@ -506,14 +520,25 @@ def build_crosslink_map(noun_entities: list, events: Optional[list] = None, comm
     lookup = {}      # surface -> (anchor, article_required)
     for s, anchor_set in combined.items():
         if len(anchor_set) > 1:
-            # Same surface form claimed by two DIFFERENT entities (two same-named
-            # entities, or the same alias on two entities). We genuinely can't pick
-            # -- linking to one arbitrarily is a coin-flip that's wrong half the
-            # time -- so it goes nowhere and a human is told.
-            logger.warning("%s crosslink: surface %r is claimed by %d entities (%s); "
-                           "left out of the link pool.",
-                           REVIEW_PREFIX, s, len(anchor_set), sorted(anchor_set))
-            continue
+            # Same surface claimed by two anchors. If it's ONE realm wearing two hats
+            # (a Location + the Organization that governs it), route the surface to the
+            # Location page so the realm stays linkable instead of going dead. Gate on
+            # `s in name_claims`: a realm dual shares the surface via both members' NAMES
+            # (Pass 3a already stripped any alias claim off a name surface), whereas two
+            # DIFFERENT entities sharing an ALIAS ("Guild A"/"Guild B" both aka "The
+            # Order") must stay ambiguous and drop -- their surface is alias-only.
+            canonical = _dual_canonical_anchor(anchor_set, anchor_kind) if s in name_claims else None
+            if canonical is None:
+                # Genuinely ambiguous -- two DIFFERENT entities (unrelated same-named
+                # entities, or the same alias on two). We can't pick (linking to one
+                # arbitrarily is wrong half the time), so it goes nowhere + a human is told.
+                logger.warning("%s crosslink: surface %r is claimed by %d entities (%s); "
+                               "left out of the link pool.",
+                               REVIEW_PREFIX, s, len(anchor_set), sorted(anchor_set))
+                continue
+            logger.info("crosslink: surface %r is a Location+Organization realm dual; "
+                        "routing to canonical anchor %r so it stays linkable.", s, canonical)
+            anchor_set = {canonical}
         (anchor,) = tuple(anchor_set)
         if s in never_link:
             # The truly-cursed escape hatch: a surface so generically common that

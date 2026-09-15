@@ -20,7 +20,7 @@ def ch(name, is_pc=True, player=None, aliases=None):
 
 def _gk(player_map):
     pairs = declared_groups_with_players(player_map)
-    return [g for _, g in pairs], [p for p, _ in pairs]
+    return [g for _, _, g in pairs], [p for p, _, _ in pairs]
 
 
 # --- a one-edit typo of a declared name folds ------------------------------- #

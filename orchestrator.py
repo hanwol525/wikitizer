@@ -17,7 +17,6 @@ from typing import Optional
 from agents.llm_client import LLMBackendResolver
 from models.message import Message
 from parsers.ingest import parse_messages
-from parsers.reaction_filter import filter_reactions
 from agents.noise_filter import NoiseFilterAgent, select_for_extraction
 from agents.locations_extractor import LocationsExtractor
 from agents.characters_extractor import CharactersExtractor
@@ -25,7 +24,7 @@ from agents.history_extractor import HistoryExtractor
 from agents.organization_extractor import OrganizationExtractor
 from agents.item_extractor import ItemExtractor
 from agents.people_and_cultures_extractor import PeopleAndCulturesExtractor
-from agents.reconciler import Reconciler
+from agents.reconciler import Reconciler, flag_subject_bleed
 from agents.prose_agent import (
     ProseAgent, build_deconflation_map, deconflate_entities, deconflate_events)
 from renderer.markdown import render_wiki
@@ -92,8 +91,10 @@ def _apply_prose(prose_agent, noun_dict, events):
 
     Called on POST-carve entities in the restricted doc, so it only ever sees facts that
     survived the exclusion, and the de-conflation map is built from the carved (public)
-    characters -- leak-safe by construction, like the History re-run. `noun_dict` is
-    keyed by NOUN_TYPES; `events` is the ordered HistoryEvent list.
+    characters -- leak-safe by construction, like the History re-run. That holds even
+    when stage 2 FAILS, because `filter_entities` clears each carved entity's `prose`:
+    the fallback body is the carved details, never the full doc's polished paragraph.
+    `noun_dict` is keyed by NOUN_TYPES; `events` is the ordered HistoryEvent list.
     """
     # --- Stage 1: deterministic de-conflation (pure; never an LLM call). ---
     try:
@@ -143,11 +144,6 @@ class PipelineConfig:
     # guess. When set, it authoritatively assigns player_name and merges the names
     # grouped under one player as a single character.
     player_map: dict = field(default_factory=dict)
-    # Which chat-log format the input files are in: "auto" (sniff each file),
-    # "imessage" (a structured imessage-exporter TXT export), or "legacy" (the
-    # copy-pasted iMessage .txt). "auto" is right for almost everyone; the two
-    # formats are trivially distinguishable (see parsers/ingest.detect_format).
-    input_format: str = "auto"
 
 
 @dataclass
@@ -253,15 +249,16 @@ class Orchestrator:
         if exclude_sources:
             validate_exclusions(exclude_sources, files)
 
-        # --- 1. Parse + reaction-filter every file, concatenate in pass-order. ---
+        # --- 1. Parse every file, concatenate in pass-order. ---
         # Pure Python, no LLM, so it's cheap and sequential. A parse failure is left
         # to RAISE (abort): it's before any paid call, and silently skipping a file
         # the caller asked for would mean silently-missing lore. source_file rides on
         # every Message, so concatenating loses no provenance (4.6 exclusion needs it).
+        # The imessage-exporter parser strips reactions/attachments/receipts structurally,
+        # so there's nothing to post-filter.
         all_messages: list[Message] = []
         for filepath in files:
-            parsed = parse_messages(filepath, config.speaker_map, config.input_format)
-            all_messages.extend(filter_reactions(parsed))
+            all_messages.extend(parse_messages(filepath, config.speaker_map))
 
         if not all_messages:
             logger.warning("No messages parsed from %d file(s); wiki will be empty.", len(files))
@@ -334,6 +331,26 @@ class Orchestrator:
                     )
                     reconciled[lore_type] = entries
 
+        # --- 4b. Cross-type resolution: one real entity captured under several types (a
+        #         people also extracted as a location) -> an LLM arbiter picks the correct
+        #         type(s), folds the losers' facts into the winner, drops the wrong-type
+        #         pages. A Location+Organization dual (a realm) is left intact. Degrades to
+        #         a no-op (all types kept) on any failure. Runs before prose+render so both
+        #         the full and restricted docs render the deduplicated set. ---
+        try:
+            reconciled = reconciler.resolve_cross_type(reconciled)
+        except Exception as exc:
+            logger.error("%s cross-type resolution failed; keeping all types as-is. %s",
+                         REVIEW_PREFIX, exc)
+
+        # Log-only [REVIEW] flag for a character detail whose leading subject is a DIFFERENT
+        # character (the CJ-on-Aerin backstory bleed) -- now that the full roster is known.
+        # Never drops; a bad flag pass must not sink the run, so it's contained.
+        try:
+            flag_subject_bleed(reconciled["characters"])
+        except Exception as exc:
+            logger.error("subject-bleed flagging failed (non-fatal): %s", exc)
+
         events = reconciled["history"]
         try:
             events = reconciler.order_history(events, current_year=config.current_year)
@@ -365,7 +382,9 @@ class Orchestrator:
         # RE-RUN over the messages minus the excluded files -- so a secret can't be
         # woven into a description, because the extractor never sees it. The prose pass
         # runs on the CARVED entities (post-exclusion), so it can only ever polish facts
-        # that survived -- leak-safe by construction, like the History re-run.
+        # that survived -- leak-safe by construction, like the History re-run. The carve
+        # also CLEARS each entity's full-doc `prose`, so a failed restricted polish falls
+        # back to the carved details rather than re-rendering the secret paragraph.
         restricted = None
         if exclude_sources:
             excluded = set(exclude_sources)   # bare filenames; validated above

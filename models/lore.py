@@ -97,6 +97,11 @@ class Character(BaseModel):
     aliases: list[Alias] = Field(default_factory=list)
     is_pc: bool = False
     player_name: Optional[str] = None
+    # Declared-party ground truth (from config/player_map.json), e.g. ["they","them"].
+    # Empty for a non-declared character (no override -> prose keeps the chat's pronouns);
+    # when set, the extractor authors details with these and the prose agent enforces them.
+    # Not rendered as a label -- it only shapes the pronoun USAGE inside the prose text.
+    pronouns: list[str] = Field(default_factory=list)
     details: list[Detail] = Field(default_factory=list)
     supporting_quotes: list[Quote] = Field(default_factory=list)
     # The prose agent's polished, de-duplicated, de-conflated body for this entity

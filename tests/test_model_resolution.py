@@ -11,6 +11,7 @@ from agents.llm_client import (
     AnthropicCompatClient,
     DEFAULT_BIG_MODEL,
     DEFAULT_CHEAP_MODEL,
+    DEFAULT_RECONCILE_MODEL,
     LLMBackendResolver,
     _parse_model_spec,
     build_llm_client,
@@ -61,8 +62,9 @@ def test_default_resolves_to_a_cached_anthropic_client(monkeypatch):
     r = LLMBackendResolver()
     c1, m1 = r.resolve("EXTRACT")
     c2, m2 = r.resolve("RECONCILE")
-    assert m1 == DEFAULT_BIG_MODEL and m2 == DEFAULT_BIG_MODEL
-    assert c1 is c2                                        # both Anthropic -> one cached client
+    assert m1 == DEFAULT_BIG_MODEL          # extraction stays "big" (Sonnet)
+    assert m2 == DEFAULT_RECONCILE_MODEL    # reconciler upgraded to Opus for merge judgment
+    assert c1 is c2                          # both Anthropic-provider -> one cached client, diff models
 
 
 def test_openai_role_builds_a_compat_client(monkeypatch):

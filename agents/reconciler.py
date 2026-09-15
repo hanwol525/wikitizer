@@ -15,15 +15,18 @@ batching (de-dup needs the whole list at once) and no new quotes to verify.
 import json
 import logging
 import re
+from collections import Counter
 from typing import Optional
 
 from pydantic import ValidationError
 
 from agents.base import BaseAgent, ClaudeJSONError, loads_tolerant, strip_code_fences
-from agents.base_extractor import _normalize_for_match
 from models.lore import Alias, Character, HistoryEvent, Scope
-from models.reconcile import ReconcileDecision, DateDecision, PlacementDecision
-from player_map import declared_groups, declared_groups_with_players
+from text_norm import name_key as _fold_name_key
+from models.reconcile import (
+    ReconcileDecision, MergeGroup, DateDecision, PlacementDecision, CrossTypeDecision,
+)
+from player_map import declared_characters, declared_groups, declared_groups_with_players
 
 logger = logging.getLogger(__name__)
 
@@ -218,6 +221,10 @@ def _entity_for_prompt(entry):
     # appears in the merge prompt -- keeps the prompt shape byte-identical and the
     # prompt cache hitting, exactly like the name_sources pop above.
     data.pop("prose", None)
+    # `pronouns` is declared-party ground truth (display metadata), never a merge signal --
+    # pop it so a new key never shifts the merge prompt (keeps the prompt cache hitting,
+    # same reason as name_sources/prose). Absent on the other five types, so a no-op there.
+    data.pop("pronouns", None)
     return data
 
 
@@ -498,14 +505,25 @@ CANDIDATE_EDIT_THRESHOLD = 2   # names within this edit distance are surfaced (n
 # folded in as a misspelling -- but only when BOTH names are at least this long, so
 # initials / very short names (CJ vs DJ) are never fuzzy-matched.
 DECLARED_TYPO_MIN_LEN = 4
+# A pair of names sharing a DISTINCTIVE word -- at least this long, and held by no more
+# than _DISTINCTIVE_TOKEN_MAX_ENTITIES entries of this type -- is surfaced to the LLM to
+# adjudicate even when neither name is a subset of the other ("Krieger Family" vs
+# "Krieger Royal House" share the distinctive "krieger"). A common word spans many
+# entries and is excluded by the frequency cap, so it can't flood the candidate list.
+_DISTINCTIVE_TOKEN_MIN_LEN = 4
+_DISTINCTIVE_TOKEN_MAX_ENTITIES = 3
 _ARTICLES = ("the ", "a ", "an ")
 
 
 def _name_key(name: str) -> str:
-    """Normalized grouping key for a name: fold typographic punctuation + whitespace
-    (reusing the extractor's verbatim normalizer) then lowercase, so two names that
-    differ only by case / whitespace / curly-vs-straight punctuation share a key."""
-    return _normalize_for_match(name).lower()
+    """Normalized grouping key for a name -- delegates to text_norm.name_key, the SAME
+    fold the cross-linker's slugify uses (case / whitespace / apostrophes / accents /
+    stray punctuation all folded away). This is load-bearing: two names that will
+    become the same crosslink anchor now always share a merge bucket, so an
+    apostrophe/accent variant like "Scoia'tael" can't split into several reconciler
+    pages that then collide on one dead anchor. Keeps articles -- article-stripping is
+    the separate _strip_article layer. Returns "" for an all-punctuation name."""
+    return _fold_name_key(name)
 
 
 def _merge_identical_names(entries, label):
@@ -521,7 +539,9 @@ def _merge_identical_names(entries, label):
     groups = {}
     order = []
     for e in entries:
-        k = _name_key(e.name)
+        # An un-normalizable name (all punctuation / emoji -> "") gets a per-entity
+        # sentinel key so two such junk names never force-merge into one page.
+        k = _name_key(e.name) or "\x00{}".format(id(e))
         if k not in groups:
             groups[k] = []
             order.append(k)
@@ -563,7 +583,7 @@ def _merge_article_variants(entries, label):
     groups = {}
     order = []
     for e in entries:
-        k = _strip_article(_name_key(e.name))
+        k = _strip_article(_name_key(e.name)) or "\x00{}".format(id(e))
         if k not in groups:
             groups[k] = []
             order.append(k)
@@ -592,10 +612,17 @@ def _merge_article_variants(entries, label):
     return out
 
 
-def _declared_canonical(members, ordered_names):
-    """Heading for a declared-party merge: the member NAME matching the earliest name in
-    the user's declared list (their preferred heading), else members[0].name. The
-    combiner's _resolve_canonical still snaps it to a verbatim member string."""
+def _declared_canonical(members, main_name, ordered_names):
+    """Heading for a declared-party merge: the user's declared MAIN NAME (original casing),
+    even when it only ever surfaced as an alias -- or never surfaced -- in the chat. This is
+    user-declared ground truth, so it wins the heading. `_combine_group`'s `_resolve_canonical`
+    returns an unmatched canonical UNCHANGED, so a main_name that isn't a verbatim member
+    string still becomes the heading (its name_sources are just empty, fine for a heading).
+    Falls back to the earliest declared name that DID surface as a member's own `.name`, then
+    `members[0].name`, when no main_name is configured (e.g. an old flat-list back-compat
+    group still has main_name = its first entry, so the fallback is rarely reached)."""
+    if main_name and main_name.strip():
+        return main_name
     by_name = {m.name.strip().lower(): m.name for m in members}
     for dn in ordered_names:
         if dn in by_name:
@@ -614,7 +641,8 @@ def _strip_aliases(entity, names_lower):
     return entity.model_copy(update={"aliases": kept})
 
 
-def _merge_declared_characters(entries, label, groups, player_keys=None):
+def _merge_declared_characters(entries, label, groups, player_keys=None, possible_dup_names=None,
+                               main_names=None, pronouns=None):
     """Deterministically merge the Character entries the user DECLARED as one character
     (grouped under one player in the player_map). Each group's names are aliases of ONE
     character, so any entries whose name OR alias falls in the same group are force-merged.
@@ -638,35 +666,66 @@ def _merge_declared_characters(entries, label, groups, player_keys=None):
     player_name=None). Trade-off (chosen by the user): a coincidental NPC sharing a
     player's first name is swept in too -- so every fold is logged loudly [REVIEW]. This
     removes the phantom page AND unblocks prose de-conflation (which otherwise bails
-    because the player's name is also an in-world character name)."""
+    because the player's name is also an in-world character name).
+
+    `possible_dup_names` (lowercased) are names the LLM parked in `possible_duplicates`
+    (looked-at-but-NOT-merged, e.g. 'Gaerin' flagged as Aerin's sibling). The FUZZY folds
+    below (typo + token) SKIP any entry the LLM flagged this way, so a deterministic floor
+    can't override the model's stated distinctness. The exact + player folds are
+    ground-truth and always apply.
+
+    The TOKEN fold: a compound name that CONTAINS a declared bare alias as a whole word
+    ('Kriggy' inside 'Kriggy Krieger') folds into that declared character -- the surname
+    variant the typo floor (edit-distance-1) and exact match both miss. Bare aliases are
+    the single-word declared names >= DECLARED_TYPO_MIN_LEN, so a shared SURNAME ('Krieger'
+    is not a bare declared alias) or a short token can't trigger it."""
     if not groups or label != "Character":
         return list(entries)
     group_sets = [set(g) for g in groups]
-    # Each declared player's own name -> its group index (aligned with `groups`).
-    player_to_gi = {pk: gi for gi, pk in enumerate(player_keys or [])}
+    # Per group: the bare SINGLE-WORD declared aliases >= DECLARED_TYPO_MIN_LEN (e.g.
+    # "kriggy"), used by the token fold. A multi-word declared name ("krigius krieger")
+    # contributes no bare token, so its surname can't leak in as a match key.
+    group_bare_tokens = [
+        {g for g in gs if " " not in g and len(g) >= DECLARED_TYPO_MIN_LEN}
+        for gs in group_sets
+    ]
+    # Each declared player's own name -> the group index(es) it owns. A LIST because a
+    # player may own several declared characters (multi-PC) -- a page named after such a
+    # player can't be disambiguated, so the player-fold only fires when the list is length 1.
+    player_to_gis = {}
+    for gi, pk in enumerate(player_keys or []):
+        player_to_gis.setdefault(pk, []).append(gi)
+    flagged = possible_dup_names or frozenset()
 
     def _keys(entry):
         return {entry.name.strip().lower()} | {a.text.strip().lower() for a in entry.aliases}
 
     def _group_index(entry):
-        """Return (group_index, reason) or (None, None); reason in {exact, typo, player}."""
+        """Return (group_index, reason) or (None, None); reason in {exact, typo, token, player}."""
         keys = _keys(entry)
         for gi, gs in enumerate(group_sets):
             if keys & gs:
                 return gi, "exact"
-        # Declared-name TYPO floor: a name one edit away from a declared name/alias (both
-        # >= DECLARED_TYPO_MIN_LEN chars, so initials/short names are never fuzzy-matched)
-        # is a misspelling of that declared character -> fold it in ("Kriggius" -> the
-        # declared "Krigius"). Anchored ONLY to ground-truth declared names, so the fuzzy
-        # match can't run wild across arbitrary entities. The typo name is kept as an
-        # alias (a real spelling variant, useful for cross-linking); the merge loop logs
-        # it [REVIEW].
-        for gi, gs in enumerate(group_sets):
-            for k in keys:
-                if len(k) >= DECLARED_TYPO_MIN_LEN and any(
-                        len(g) >= DECLARED_TYPO_MIN_LEN and _edit_distance(k, g) == 1
-                        for g in gs):
-                    return gi, "typo"
+        # Distinctness gate: if the LLM parked any of this entry's names as a
+        # possible-but-NOT-merged duplicate, do NOT let the fuzzy folds override it.
+        if not (keys & flagged):
+            # Declared-name TYPO floor: a name one edit away from a declared name/alias
+            # (both >= DECLARED_TYPO_MIN_LEN chars, so initials/short names are never
+            # fuzzy-matched) is a misspelling of that declared character -> fold it in
+            # ("Kriggius" -> the declared "Krigius"). Anchored ONLY to ground-truth
+            # declared names. The typo name is kept as an alias; the merge loop logs it.
+            for gi, gs in enumerate(group_sets):
+                for k in keys:
+                    if len(k) >= DECLARED_TYPO_MIN_LEN and any(
+                            len(g) >= DECLARED_TYPO_MIN_LEN and _edit_distance(k, g) == 1
+                            for g in gs):
+                        return gi, "typo"
+            # TOKEN fold: a compound name containing a declared bare alias as a whole word
+            # ("Kriggy Krieger" -> the group whose bare alias "kriggy" is one of its tokens).
+            name_tokens = {t for t in re.findall(r"[^\W_]+", entry.name.lower())}
+            for gi, bare in enumerate(group_bare_tokens):
+                if name_tokens & bare:
+                    return gi, "token"
         # Ground-truth fold: a character named exactly like a declared player (a
         # player_map KEY owning a declared group) is that player's PC mis-titled with the
         # player's own name -> fold it in. NOT gated on is_pc and NOT gated on a NULL
@@ -677,17 +736,26 @@ def _merge_declared_characters(entries, label, groups, player_keys=None):
         # just respects a stated contradiction. A coincidental NPC sharing a player's name
         # IS swept in (accepted by the user); the merge loop logs every fold [REVIEW].
         name_l = entry.name.strip().lower()
-        if name_l in player_to_gi:
+        gis = player_to_gis.get(name_l)
+        if gis:
             pn = (getattr(entry, "player_name", None) or "").strip().lower()
             if pn and pn != name_l:
                 return None, None
-            return player_to_gi[name_l], "player"
+            if len(gis) == 1:
+                return gis[0], "player"
+            # The player owns several declared PCs -> can't tell which this page is; leave
+            # it separate + [REVIEW] rather than fold it into an arbitrary one.
+            logger.warning("%s Reconciler[%s]: character %r is named after a player who has "
+                           "%d declared characters; can't disambiguate -- leaving it separate.",
+                           REVIEW_PREFIX, label, entry.name, len(gis))
+            return None, None
         return None, None
 
     buckets = {}       # group index -> [members]
     plan = []          # output order: ("solo", entry) | ("group", gi) first-seen
     folded = {}        # group index -> {player-name-str folded in} (to strip from aliases)
     typo_folded = {}   # group index -> {typo name folded in} (logged [REVIEW], kept as alias)
+    token_folded = {}  # group index -> {compound name folded in} (logged [REVIEW], kept as alias)
     for e in entries:
         gi, reason = _group_index(e)
         if gi is None:
@@ -698,10 +766,18 @@ def _merge_declared_characters(entries, label, groups, player_keys=None):
                 plan.append(("group", gi))
             buckets[gi].append(e)
             nm = e.name.strip().lower()
-            if reason == "player" and player_to_gi.get(nm) == gi:
+            if reason == "player":
                 folded.setdefault(gi, set()).add(nm)   # phantom -> strip player name from aliases
             elif reason == "typo":
                 typo_folded.setdefault(gi, set()).add(e.name)
+            elif reason == "token":
+                token_folded.setdefault(gi, set()).add(e.name)
+
+    def _stamp_pronouns(c, gi):
+        """Stamp the declared character's ground-truth pronouns onto a merged/folded entry
+        (a fresh list per entity). A no-op when no pronouns are configured for that group."""
+        p = pronouns[gi] if pronouns and gi < len(pronouns) else None
+        return c.model_copy(update={"pronouns": list(p)}) if p else c
 
     out = []
     for kind, val in plan:
@@ -719,9 +795,10 @@ def _merge_declared_characters(entries, label, groups, player_keys=None):
                                "player(s) %s but no declared sibling character exists to fold "
                                "it into; leaving it as-is for review.", REVIEW_PREFIX, label,
                                members[0].name, sorted(strip))
-            out.append(members[0])
+            out.append(_stamp_pronouns(members[0], val))
             continue
-        canonical = _declared_canonical(members, groups[val])
+        main_name = main_names[val] if main_names and val < len(main_names) else None
+        canonical = _declared_canonical(members, main_name, groups[val])
         try:
             merged = _combine_group(members, canonical, allow_majority=True)
         except _VetoMerge as veto:
@@ -741,10 +818,51 @@ def _merge_declared_characters(entries, label, groups, player_keys=None):
             logger.warning("%s Reconciler[%s]: folded likely-misspelling(s) %s into declared "
                            "character %r (one edit from a declared name).",
                            REVIEW_PREFIX, label, sorted(tf), merged.name)
+        tk = token_folded.get(val)
+        if tk:
+            logger.warning("%s Reconciler[%s]: folded compound name(s) %s into declared "
+                           "character %r (contains a declared alias as a whole word).",
+                           REVIEW_PREFIX, label, sorted(tk), merged.name)
         logger.info("Reconciler[%s]: declared-party merge of %d entries -> %r.",
                     label, len(members), merged.name)
-        out.append(merged)
+        out.append(_stamp_pronouns(merged, val))
     return out
+
+
+def flag_subject_bleed(characters) -> None:
+    """Log a [REVIEW] line for any Character detail whose LEADING SUBJECT is a DIFFERENT
+    extracted character -- the "CJ's fact landed on Aerin's page" backstory bleed the
+    Characters extractor can produce (a detail's subject is the LLM's free choice, which no
+    code can verify). LOG-ONLY, never drops: the subject of free-form prose can't be proven,
+    so a fact naming another character MID-sentence ("cousin of Skjoldr") is legitimate and
+    left alone -- only a detail that STARTS with another character's name/alias as a whole
+    word ("CJ doesn't think she's lame") is surfaced. Call it AFTER character reconcile +
+    cross-type, when the full roster is known."""
+    owners = {}   # surface_lower -> {owning character name, ...}
+    for c in characters:
+        for s in [c.name] + [a.text for a in c.aliases]:
+            key = s.strip().lower()
+            if key:
+                owners.setdefault(key, set()).add(c.name)
+    surfaces_longest_first = sorted(owners.items(), key=lambda kv: -len(kv[0]))
+    for c in characters:
+        own = {c.name.strip().lower()} | {a.text.strip().lower() for a in c.aliases}
+        for d in c.details:
+            t = d.text.strip()
+            tl = t.lower()
+            for surf, surf_owners in surfaces_longest_first:
+                if len(surf) < 2 or not tl.startswith(surf):
+                    continue
+                after = t[len(surf):len(surf) + 1]
+                if after and after.isalnum():
+                    continue                       # not a whole-word prefix ("CJ" in "CJohn")
+                if surf in own:
+                    break                          # leads with THIS character's own name -> fine
+                logger.warning("%s Reconciler[Character]: possible subject-bleed on %r -- a "
+                               "detail begins with a different character (%s): %r",
+                               REVIEW_PREFIX, c.name, sorted(surf_owners), d.text)
+                break                              # at most one flag per detail
+        # (no return -- pure logging side effect)
 
 
 def _edit_distance(a: str, b: str) -> int:
@@ -773,12 +891,20 @@ def _strip_article(key: str) -> str:
 
 
 def _candidate_pairs(entries, limit: int = 50):
-    """Advisory list of spelling-close / one-plus-extra-words name pairs for the LLM to
-    explicitly adjudicate -- it NEVER auto-merges (so CJ/DJ-style one-letter siblings
-    stay the LLM's call, decided from context). Identical names are handled by the
-    deterministic floor, not here. Returns [(i, j, reason), ...], capped at `limit`."""
+    """Advisory list of spelling-close / one-plus-extra-words / shared-distinctive-word
+    name pairs for the LLM to explicitly adjudicate -- it NEVER auto-merges (so CJ/DJ-style
+    one-letter siblings stay the LLM's call, decided from context). Identical names are
+    handled by the deterministic floor, not here. Returns [(i, j, reason), ...], capped at
+    `limit`."""
     keys = [_name_key(e.name) for e in entries]
     toks = [set(_strip_article(k).split()) for k in keys]
+    # token -> how many entries (of this type) contain it. A token in few entries is
+    # "distinctive" enough that two names sharing it deserve a second look even when
+    # neither is a subset of the other; a common word spans many entries -> excluded.
+    tok_freq = Counter()
+    for ts in toks:
+        for t in ts:
+            tok_freq[t] += 1
     pairs = []
     n = len(entries)
     for i in range(n):
@@ -793,6 +919,17 @@ def _candidate_pairs(entries, limit: int = 50):
                 reason = "one letter off"
             elif toks[i] and toks[j] and (toks[i] < toks[j] or toks[j] < toks[i]):
                 reason = "one name is the other plus extra words (article/title/descriptor)"
+            else:
+                # Neither spelling-close nor subset, but they share a distinctive word --
+                # e.g. "Krieger Family" / "Krieger Royal House" share "krieger". Surface
+                # for adjudication; the frequency cap keeps a common word from flooding.
+                shared = sorted(
+                    t for t in (toks[i] & toks[j])
+                    if len(t) >= _DISTINCTIVE_TOKEN_MIN_LEN
+                    and tok_freq[t] <= _DISTINCTIVE_TOKEN_MAX_ENTITIES
+                )
+                if shared:
+                    reason = "share the distinctive word(s) {}".format(", ".join(shared))
             if reason:
                 pairs.append((i, j, reason))
                 if len(pairs) >= limit:
@@ -886,6 +1023,96 @@ def _valid_merge_subset(decision, entries, label):
         seen.update(members)
         kept.append(group)
     return ReconcileDecision(merges=kept, possible_duplicates=decision.possible_duplicates)
+
+
+# A merge component larger than this is treated as a suspected runaway CHAIN (one bad
+# overlap link stitching unrelated entities together): its merges are DROPPED (members
+# fall back to singletons) + a loud [REVIEW]. Under-merge is the safe direction; a
+# generous cap so a genuinely-well-aliased entity still merges. Tunable.
+MERGE_COMPONENT_CAP = 8
+
+
+def _coalesce_overlapping_groups(merges, entries, label):
+    """Union merge groups that SHARE an index into one connected component BEFORE
+    validation, so the LLM listing one entry in two groups -- {A,B} + {B,C}, the "index
+    already used in another group" failure -- becomes ONE merge {A,B,C} instead of the
+    validator rejecting the overlap and the salvage dropping a legit merge (the Lake
+    Mundi+Mundi / Skjoldr / Ambrose losses this class caused). Non-overlapping groups pass
+    through untouched. A component whose union exceeds MERGE_COMPONENT_CAP is a suspected
+    runaway -> its merges are DROPPED + [REVIEW].
+
+    ONLY groups that would pass validation on their own (>= 2 distinct, in-range members)
+    are eligible for union; a BROKEN group (out-of-range / duplicate / < 2) is passed
+    THROUGH unchanged, so it can't drag a valid merge into a doomed component -- it's left
+    for the existing validate -> salvage machinery to drop on its own. Returns a NEW list of
+    MergeGroups; the coalesced components are disjoint, so downstream `_validate_decision` /
+    `_apply` work unchanged and the "index reused" rule simply stops firing on real overlaps."""
+    if not merges:
+        return []
+    n = len(entries)
+
+    def _clean(g):
+        return (len(g.members) >= 2
+                and len(set(g.members)) == len(g.members)
+                and all(0 <= m < n for m in g.members))
+
+    clean = [g for g in merges if _clean(g)]
+    passthrough = [g for g in merges if not _clean(g)]
+    if not clean:
+        return list(merges)                # nothing unionable; hand originals to validation
+
+    # Union-find over the clean groups' member indices.
+    parent = {}
+
+    def find(x):
+        parent.setdefault(x, x)
+        root = x
+        while parent[root] != root:
+            root = parent[root]
+        while parent[x] != root:           # path-compress
+            parent[x], x = root, parent[x]
+        return root
+
+    def union(a, b):
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[rb] = ra
+
+    for g in clean:
+        for m in g.members[1:]:
+            union(g.members[0], m)
+
+    # Group the clean merge-groups by component root (first-seen order = deterministic).
+    comp_members = {}   # root -> set(indices)
+    comp_groups = {}    # root -> [MergeGroup, ...]
+    for g in clean:
+        root = find(g.members[0])
+        comp_members.setdefault(root, set()).update(g.members)
+        comp_groups.setdefault(root, []).append(g)
+
+    out = []
+    for root, members in comp_members.items():
+        groups = comp_groups[root]
+        if len(groups) == 1:
+            out.append(groups[0])          # no overlap -> unchanged
+            continue
+        member_list = sorted(members)
+        if len(member_list) > MERGE_COMPONENT_CAP:
+            names = [entries[i].name for i in member_list if 0 <= i < n]
+            logger.warning("%s Reconciler[%s]: overlapping merge groups union to %d members "
+                           "(> cap %d) -- suspected runaway chain; dropping the merge, keeping "
+                           "them separate: %s", REVIEW_PREFIX, label, len(member_list),
+                           MERGE_COMPONENT_CAP, names)
+            continue
+        # Canonical = the canonical of the LARGEST constituent group (ties -> first). It is
+        # a name/alias of one of ITS members, all of which are in the union, so
+        # _validate_decision's "canonical is a member" rule still passes.
+        biggest = max(groups, key=lambda g: len(g.members))
+        conflicts = [c for g in groups for c in g.conflicts]
+        out.append(MergeGroup(members=member_list, canonical=biggest.canonical,
+                              conflicts=conflicts))
+    out.extend(passthrough)                # broken groups: untouched, validation drops them
+    return out
 
 
 # --------------------------------------------------------------------------- #
@@ -1204,6 +1431,7 @@ Strong evidence to merge (these ARE strong -- put them in "merges", NOT "possibl
 - A clear MISSPELLING: two names differ by only a letter or two and NOTHING marks them as distinct things (see the spelling section). This is a merge, not a maybe -- e.g. "Maltaav"/"Maltraav" (the same place, one letter off).
 - A longer name that is plainly the SAME entity plus an article, a title, or a descriptor (see the trap section) -- e.g. "The Imperium"/"Krieger Imperium", "Krieger family"/"Krieger royal family".
 - The SAME referent under two descriptions that share NO words, when the entries clearly describe one and the same thing. This happens two ways: (a) a shared defining tie -- the same owner/subject AND the same kind of thing (e.g. "CJ's family adventuring agency" and "the adventuring agency run by CJ's parents" are ONE agency; "the guard Kriggy travels with" and "Skjoldr, Kriggy's bodyguard" are ONE person); or (b) two names the text uses for one thing (e.g. "the old fort" and "Blackspire Keep" for one keep). Merge only when the descriptions unambiguously point to a SINGLE referent of the same KIND; if you are not sure they are the same one, leave them separate and report a possible_duplicate. (Extractor batches are kept file-pure, so two files describing the same thing under different names arrive as separate entries with no shared alias -- recognizing them as one referent is your job here.)
+- CAUTION on the shared-tie rule above -- a GUARD and the person they GUARD are TWO DIFFERENT people, never one. "the young prince who is guarded by a bodyguard" (the protected) and "the bodyguard who protects the prince" (the protector) are separate entities; the tie "bodyguard of the prince" identifies the GUARD, and the prince is someone else. Do NOT merge a protector with the protected -- likewise a servant with their master, or a mount with its rider. Their backstories are different people's backstories.
 
 Weak evidence (do NOT merge on this alone -- report as a possible duplicate):
 - Two entries just SOUND like they might be the same, but nothing ever says so AND there is no clear misspelling or shared-entity descriptor linking them.
@@ -1231,6 +1459,7 @@ But do NOT let this rule block a merge when a longer and a shorter name clearly 
 - "Free Islands" and "Dwarven Free Islands" -> the same territory. MERGE.
 - Two names for the SAME realm or group that differ only by an interchangeable SYNONYM or translation of one word -- "Krieger Empire" and "Krieger Imperium" (Empire = Imperium), "the Free City" and "the Free Town" -- are one entity. MERGE. (Unlike the person-vs-realm trap above, the KIND is the same here; only a synonym word differs.)
 - A bare group name and that same group named by its homeland or origin, when the lore itself ties them together -- "Orcs" and "Orcs of the frozen wild" where the text says the orcs come from the frozen wild -- is ONE people described broadly and by where they live, NOT a new subgroup. MERGE.
+- A DEMONYM and "the people of <that place>" name ONE people -- "the Ohwadians" and "the people of Owhad", "the Krieg" and "the people of Kriega" are the same group under a demonym vs. a descriptive phrase. MERGE.
 The test is KIND, not length: two names for the ONE same thing merge; a person and the empire named after them stay apart even though one name contains the other.
 
 ## Worked examples -- follow these closely
@@ -1299,7 +1528,7 @@ Read a written-out ordinal as its number ("Third" -> 3, "Fourth Era" -> 4). Use 
 ## System: a consistent label for the calendar
 Give each date a short label for its calendar -- "AR years", "Elder Scrolls eras", "Hebrew calendar", etc. Use the SAME label for every event in the same calendar so they group together. If two events use DIFFERENT notations but the text states they are the SAME calendar (e.g. "1347, that is, Third Era 347"), give them the same label and put their parts on the same scale.
 
-STRONGLY DEFAULT TO A SINGLE CALENDAR SYSTEM. Put every dated event on ONE shared scale and label unless the campaign clearly uses genuinely different, incompatible dating schemes that cannot be placed on one axis. In particular, a run of rulers' reigns or regnal years that counts CONTINUOUSLY -- each reign's years follow on from the previous one with NO reset to 0 per ruler (e.g. one reign is "0 to 50", the next "51 to 100", the next "151 to 200") -- is ONE calendar, not several: give them all the same label and place their parts on the same scale. Only introduce a SECOND system when two dates truly cannot be ordered on one axis (two unrelated calendars the text never equates).
+STRONGLY DEFAULT TO A SINGLE CALENDAR SYSTEM. Put every dated event on ONE shared scale and label unless the campaign clearly uses genuinely different, incompatible dating schemes that cannot be placed on one axis. In particular, a run of rulers' reigns or regnal years that counts CONTINUOUSLY -- each reign's years follow on from the previous one with NO reset to 0 per ruler (e.g. one reign is "0 to 50", the next "51 to 100", the next "151 to 200") -- is ONE calendar, not several: give them all the same label and place their parts on the same scale. A founding or epoch anchor stated as "Year 0" (e.g. "the Citadel was founded in Year 0") -- the zero point the same-scale reign years or era counts are measured FROM -- is part of that SAME system: put it on the shared scale with parts [0]. Do NOT spin a Year-0 or founding date off into its own one-event system; it belongs at the START of the main timeline, and giving it a separate system would render it as its own tiny timeline and bury the earliest event mid-page. Only introduce a SECOND system when two dates truly cannot be ordered on one axis (two unrelated calendars the text never equates).
 
 ## Present-relative offsets and the reference year
 Some events give their date as an offset from the present ("200 years ago", "40 years ago", "two centuries ago") instead of an absolute year. Resolve these against a REFERENCE YEAR -- the campaign's present day:
@@ -1343,6 +1572,7 @@ There is also an "Undated timeline" for events that have a relative order among 
 
 ## CRITICAL: don't guess
 - Place an event ONLY where its clue actually supports. If an event has no usable relative clue and no link to any marker or other event, LEAVE IT OUT entirely -- it goes under "Could Not Place" rather than being guessed into a spot.
+- The dated MARKERS shown in each timeline are already placed, FIXED reference points -- they are context only. NEVER choose a gap for a marker (a dated event); only the UNDATED events explicitly offered for placement get a gap.
 - Use only what the descriptions state. No real-world knowledge.
 
 ## Output -- return ONLY this JSON, nothing else
@@ -1353,6 +1583,96 @@ There is also an "Undated timeline" for events that have a relative order among 
 - If you can place none, return {"placements": []}.
 - Return ONLY the JSON object -- no preamble, no markdown fences.
 """
+
+
+# --------------------------------------------------------------------------- #
+# Cross-type resolution. The six extractors run independently, so ONE real entity
+# is sometimes captured under several types (a people also extracted as a location).
+# An LLM arbiter picks the correct type(s); Python folds the losers' facts into the
+# winner and drops the wrong-type pages. Same LLM-decides / Python-assembles split as
+# 4.1a: the model only names winning TYPES, never touches a fact.
+# --------------------------------------------------------------------------- #
+
+# Iteration + winner-tiebreak order (a legit realm keeps locations over organizations,
+# and a place beats a people on a tie); also the noun types the arbiter ever considers.
+_CROSS_TYPE_ORDER = ("locations", "organizations", "people", "characters", "items")
+# The ONE intended cross-type dual: a realm is both a place (locations) and a governing
+# body (organizations). A cluster confined to these is left alone, never arbitrated.
+_CROSS_TYPE_LEGIT_DUAL = frozenset({"locations", "organizations"})
+
+
+CROSS_TYPE_PROMPT = """\
+You are the type arbiter for a D&D lore wiki. Six extractors ran independently, so the SAME real thing was sometimes captured under MORE THAN ONE type. For each group below, decide which type(s) correctly classify that one real entity, based ONLY on the facts shown.
+
+The types and what each means:
+- locations: a PLACE -- a realm, country, region, city, landmark, or territory (its geography, where it sits).
+- organizations: a structured BODY -- a government, guild, order, council, company, army, or a noble house spoken of as a power (who runs it, how it is structured).
+- people: a PEOPLE or CULTURE -- a race, species, ethnic group, tribe, clan, or the people of a nation, defined by shared ancestry or heritage.
+- characters: a single INDIVIDUAL -- one named person or one creature.
+- items: a physical OBJECT a person could pick up or carry.
+
+## A realm is BOTH a place and a power
+A realm/nation/kingdom legitimately exists as BOTH a "locations" entry (its territory) AND an "organizations" entry (its government). If a realm is captured under both, KEEP BOTH.
+
+## How to choose
+Pick the type(s) that match what the entity actually IS, from its facts:
+- A resistance movement, clan, tribe, or race captured as a "locations" is misfiled -> it is "people" (or "organizations" if it is a formal body), not a place.
+- A territory or realm captured as a "people" is misfiled -> it is "locations" (and maybe "organizations"), not a people.
+- An object, place, or group captured as an "items" is almost always misfiled.
+- "organizations" vs "people": a formal, structured BODY (a government, guild, order, army, resistance cell) is an "organizations"; the PEOPLE themselves (a race, tribe, clan, the folk of a nation) are a "people". A named group is usually ONE of these -- pick the better fit; keep BOTH only when the facts clearly describe a formal governing body AND a distinct people/culture.
+Keep only the type(s) that genuinely fit; the rest are dropped and their facts folded into what you keep. PREFER a SINGLE type -- the only routine two-type case is the realm (locations + organizations, above).
+
+## Output -- return ONLY this JSON, nothing else
+{"choices": [{"cluster": <the [N] id>, "keep_types": ["<type>", ...]}, ...]}
+- "keep_types" must be a NON-EMPTY subset of the types actually shown for that cluster. Prefer ONE type; use several only for a realm dual or when the facts genuinely support more than one.
+- Give one choice per cluster. If you truly cannot tell, keep ALL of that cluster's types (the safe answer).
+- Return ONLY the JSON object -- no preamble, no markdown fences.
+"""
+
+
+def _cross_type_fact_count(entity) -> int:
+    """How much evidence an entity carries -- details + supporting quotes. Used to pick
+    the most-authoritative winner among the kept types (tie broken by _CROSS_TYPE_ORDER)."""
+    return len(entity.details) + len(entity.supporting_quotes)
+
+
+def _fold_cross_type_facts(winner, losers):
+    """Return a copy of `winner` with each loser's details/aliases/quotes unioned in
+    (deduped with the same helpers 4.1a uses). The losers are the SAME real entity
+    misfiled under another type, so their facts are the winner's facts -- we keep the
+    lore and just drop the duplicate page. Never mutates the inputs."""
+    details = list(winner.details)
+    aliases = list(winner.aliases)
+    quotes = list(winner.supporting_quotes)
+    for l in losers:
+        details.extend(l.details)
+        aliases.extend(l.aliases)
+        quotes.extend(l.supporting_quotes)
+    return winner.model_copy(update={
+        "details": _dedup_details(details),
+        "aliases": _dedup_aliases(aliases),
+        "supporting_quotes": _dedup_quotes(quotes),
+    })
+
+
+def _validate_cross_type_decision(decision, clusters) -> list:
+    """Light sanity-check on the arbiter reply (retry on any problem, like 4.1a). Lenient
+    on purpose -- the apply step already filters unknown types out of keep_types; we only
+    reject a choice that points at an unknown cluster or keeps NONE of that cluster's
+    actual types (a sign the model misread the task)."""
+    problems = []
+    n = len(clusters)
+    for c in decision.choices:
+        if c.cluster < 0 or c.cluster >= n:
+            problems.append(f"choice references unknown cluster {c.cluster}")
+            continue
+        tmap = clusters[c.cluster][1]
+        if not c.keep_types:
+            problems.append(f"cluster {c.cluster}: empty keep_types")
+        elif not (set(c.keep_types) & set(tmap)):
+            problems.append(
+                f"cluster {c.cluster}: keep_types {c.keep_types} include none of {sorted(tmap)}")
+    return problems
 
 
 class Reconciler(BaseAgent):
@@ -1371,14 +1691,17 @@ class Reconciler(BaseAgent):
         # 8192 headroom. setdefault, so an explicit caller value still wins.
         kwargs.setdefault("max_tokens", 8192)
         super().__init__(**kwargs)
-        # The declared party -> per-player normalized name-lists, for the deterministic
-        # declared-merge floor (Characters only). Empty when no party is configured. Keep
-        # the owning player key alongside each group (aligned lists) so a character
-        # mis-named after a player -- the player minted as their own PC -- folds into that
-        # player's declared character.
-        self._declared_pairs = declared_groups_with_players(player_map or {})
-        self._declared_groups = [names for _, names in self._declared_pairs]
-        self._declared_player_keys = [player for player, _ in self._declared_pairs]
+        # The declared party -> one DeclaredCharacter per PC (multi-PC: a player appears in
+        # several), for the deterministic declared-merge floor (Characters only). Empty when
+        # no party is configured. Aligned lists: recognition names (incl. the last-name
+        # cross-product), the owning player key (so a page mis-named after a player folds
+        # into that player's PC), the canonical DISPLAY name (the heading), and the declared
+        # pronouns (stamped onto the merged Character as ground truth).
+        self._declared = declared_characters(player_map or [])
+        self._declared_groups = [dc.recognition for dc in self._declared]
+        self._declared_player_keys = [dc.player.strip().lower() for dc in self._declared]
+        self._declared_main_names = [dc.main_name for dc in self._declared]
+        self._declared_pronouns = [dc.pronouns for dc in self._declared]
 
     def reconcile(self, entries: list) -> list:
         # 0 or 1 entries can't contain a duplicate -> nothing to do, and don't spend
@@ -1401,6 +1724,12 @@ class Reconciler(BaseAgent):
                 logger.warning("Reconciler[%s]: bad decision JSON (attempt %d/3); raw was: %r",
                                label, attempt + 1, raw)
                 continue
+            # UNION groups the LLM overlapped (one entry listed in two groups) into single
+            # components BEFORE validating -- so the "index already used" failure stops
+            # dropping legit merges (Lake Mundi+Mundi, Skjoldr, Ambrose). Disjoint by
+            # construction, so validation + apply below are unchanged.
+            parsed = parsed.model_copy(update={
+                "merges": _coalesce_overlapping_groups(parsed.merges, entries, label)})
             last_parsed = parsed
             problems = _validate_decision(parsed, entries)
             if problems:
@@ -1420,7 +1749,8 @@ class Reconciler(BaseAgent):
                              "returning %d entries unmerged.", label, len(entries))
                 return _merge_declared_characters(
                     _merge_identical_names(list(entries), label), label,
-                    self._declared_groups, self._declared_player_keys)
+                    self._declared_groups, self._declared_player_keys,
+                    main_names=self._declared_main_names, pronouns=self._declared_pronouns)
             # Parsed but never fully clean. Instead of discarding EVERY merge over one
             # bad group (the all-or-nothing failure that stranded ~40 good merges in a
             # 115-entry run), salvage the valid groups and drop only the broken ones.
@@ -1436,8 +1766,17 @@ class Reconciler(BaseAgent):
         # character in the player_map. All run on the merged output, so no index conflict.
         merged = _merge_identical_names(self._apply(decision, entries, label), label)
         merged = _merge_article_variants(merged, label)
+        # Names the LLM parked as possible-but-NOT-merged duplicates (indices into the
+        # ORIGINAL entries; a name survives the merges as either a name or an alias). The
+        # declared floor's fuzzy folds (typo/token) skip these so a deterministic merge
+        # can't override the model's stated distinctness (e.g. 'Gaerin' vs 'Aerin').
+        flagged = {entries[i].name.strip().lower()
+                   for pd in decision.possible_duplicates
+                   for i in pd.members if 0 <= i < len(entries)}
         return _merge_declared_characters(merged, label, self._declared_groups,
-                                          self._declared_player_keys)
+                                          self._declared_player_keys, possible_dup_names=flagged,
+                                          main_names=self._declared_main_names,
+                                          pronouns=self._declared_pronouns)
 
     def _build_user_message(self, entries) -> str:
         label = _type_label(entries[0])
@@ -1716,4 +2055,111 @@ class Reconciler(BaseAgent):
         for i in range(len(events)):
             if i not in dated_indices:
                 lines.append(f"  [{i}] {events[i].name}: {events[i].description!r}")
+        return "\n".join(lines)
+
+    # ----------------------------------------------------------------------- #
+    # Cross-type resolution -- one LLM call after per-type reconcile. The model
+    # names the correct type(s) per conflicted name; Python folds + drops.
+    # ----------------------------------------------------------------------- #
+
+    def resolve_cross_type(self, by_type: dict) -> dict:
+        """De-duplicate a real entity captured under MULTIPLE types. `by_type` is keyed by
+        the orchestrator's noun-type strings (locations/characters/organizations/items/
+        people); other keys (history) pass through untouched. An LLM arbiter picks the
+        correct type(s) for each name held by 2+ types; Python folds the losers' facts into
+        the winner and drops the wrong-type pages. A Location+Organization dual (a realm is
+        both) is left alone. Degrades to a NO-OP (everything kept) on any LLM/parse failure.
+        Returns a NEW dict; never mutates the inputs."""
+        noun = [t for t in _CROSS_TYPE_ORDER if t in by_type]
+
+        # 1. cluster entities by normalized name across types (within a type the name is
+        #    unique post-reconcile; first index wins if not). Strip a leading article so a
+        #    place-vs-org dual split as "Citadel" (Location) / "The Citadel" (Organization)
+        #    still clusters -- the per-type article floor can't bridge two type lists.
+        clusters_map = {}   # article-stripped name_key -> {type: index}
+        for t in noun:
+            for idx, e in enumerate(by_type[t]):
+                k = _strip_article(_name_key(e.name))
+                if k:
+                    clusters_map.setdefault(k, {}).setdefault(t, idx)
+
+        # 2. keep only true cross-type conflicts (>= 2 types), minus the legit realm dual.
+        clusters = [(k, tmap) for k, tmap in clusters_map.items()
+                    if len(tmap) >= 2 and not (set(tmap) <= _CROSS_TYPE_LEGIT_DUAL)]
+        if not clusters:
+            return dict(by_type)
+
+        # 3. one arbiter call; total failure -> keep everything (safe).
+        decision = self._call_cross_type(clusters, by_type)
+        if decision is None:
+            logger.error("%s cross-type: no usable arbiter decision after 3 attempts; keeping "
+                         "all %d conflicted name(s) unmerged.", REVIEW_PREFIX, len(clusters))
+            return dict(by_type)
+        by_cluster = {c.cluster: c.keep_types for c in decision.choices}
+
+        # 4. apply -- pure Python.
+        drops = {t: set() for t in noun}   # type -> {idx to drop}
+        absorb = {}                        # (winner_type, winner_idx) -> [loser entities]
+        for cid, (k, tmap) in enumerate(clusters):
+            keep = {t for t in (by_cluster.get(cid) or []) if t in tmap}
+            if not keep:                   # omitted or unusable -> keep all this cluster's types
+                continue
+            lose = set(tmap) - keep
+            if not lose:
+                continue
+            # primary winner absorbs the losers' facts: most evidence, tie by _CROSS_TYPE_ORDER.
+            winner_type = max(keep, key=lambda t: (_cross_type_fact_count(by_type[t][tmap[t]]),
+                                                   -_CROSS_TYPE_ORDER.index(t)))
+            w_idx = tmap[winner_type]
+            absorb.setdefault((winner_type, w_idx), []).extend(by_type[t][tmap[t]] for t in lose)
+            for t in lose:
+                drops[t].add(tmap[t])
+            logger.warning("%s cross-type: %r kept as %s, dropped from %s (facts folded in).",
+                           REVIEW_PREFIX, by_type[winner_type][w_idx].name, sorted(keep), sorted(lose))
+
+        # 5. rebuild each type list (drop losers, augment winners); carry non-noun keys.
+        out = {}
+        for t in noun:
+            new_list = []
+            for idx, e in enumerate(by_type[t]):
+                if idx in drops[t]:
+                    continue
+                extra = absorb.get((t, idx))
+                new_list.append(_fold_cross_type_facts(e, extra) if extra else e)
+            out[t] = new_list
+        for t, v in by_type.items():
+            out.setdefault(t, v)
+        return out
+
+    def _call_cross_type(self, clusters, by_type):
+        """The arbiter call: parse -> validate -> retry 3x, else None (caller degrades)."""
+        for attempt in range(3):
+            raw = self.call_claude(CROSS_TYPE_PROMPT,
+                                   self._build_cross_type_message(clusters, by_type))
+            parsed = _parse_json_model(raw, CrossTypeDecision)
+            if parsed is None:
+                logger.warning("Cross-type: bad JSON (attempt %d/3); raw: %r", attempt + 1, raw)
+                continue
+            problems = _validate_cross_type_decision(parsed, clusters)
+            if problems:
+                logger.warning("Cross-type: invalid (attempt %d/3): %s",
+                               attempt + 1, "; ".join(problems))
+                continue
+            return parsed
+        return None
+
+    def _build_cross_type_message(self, clusters, by_type) -> str:
+        """One block per conflicted name: its candidate types, each with the entity's
+        first few detail texts so the arbiter can judge what it actually IS."""
+        lines = ["These names were each extracted under MORE THAN ONE type. For each, choose "
+                 "the correct type(s).\n"]
+        for cid, (k, tmap) in enumerate(clusters):
+            any_t = next(t for t in _CROSS_TYPE_ORDER if t in tmap)
+            lines.append(f"[{cid}] the name {by_type[any_t][tmap[any_t]].name!r} appears under "
+                         f"{len(tmap)} types:")
+            for t in _CROSS_TYPE_ORDER:
+                if t in tmap:
+                    e = by_type[t][tmap[t]]
+                    facts = "; ".join(d.text for d in e.details[:4]) or "(no details)"
+                    lines.append(f"    - {t}: {e.name!r} -- {facts}")
         return "\n".join(lines)

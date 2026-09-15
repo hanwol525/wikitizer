@@ -50,8 +50,8 @@ NO_MERGE = json.dumps({"merges": [], "possible_duplicates": []})
 # character's declared names; "Sam"/"Conrad" are keys, never character values.)
 PM = {"Sam": ["Krigius Krieger", "Kriggy"], "Conrad": ["CJ"]}
 _pairs = declared_groups_with_players(PM)
-GROUPS = [g for _, g in _pairs]
-KEYS = [p for p, _ in _pairs]
+GROUPS = [g for _, _, g in _pairs]
+KEYS = [p for p, _, _ in _pairs]
 
 
 def ch(name, is_pc=True, player=None, aliases=None):
