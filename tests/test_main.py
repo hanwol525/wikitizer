@@ -194,14 +194,31 @@ def test_main_confirm_players_builds_and_saves_config(tmp_path, stub_pipeline, m
     # so here we stub it and assert main() calls save_player_map with its output.
     stub_pipeline(WikiOutput(full="FULL", characters=["<pc objects>"]))
     saved = {}
-    monkeypatch.setattr(main_mod, "confirm_player_map",
-                        lambda pcs, existing: {"Sam": ["Kriggy"]})
+    party = [{"player": "Sam", "main_name": "Kriggy", "last_name": None,
+              "aliases": [], "pronouns": ["he", "him"]}]
+    monkeypatch.setattr(main_mod, "confirm_player_map", lambda pcs, existing: party)
     monkeypatch.setattr(main_mod, "save_player_map",
                         lambda mapping, path: saved.update(mapping=mapping, path=path))
     main_mod.main(["--files", "logs/a.txt", "--output", str(tmp_path / "wiki.md"),
                    "--confirm-players"])
-    assert saved["mapping"] == {"Sam": ["Kriggy"]}
+    assert saved["mapping"] == party
     assert saved["path"] == main_mod.PLAYER_MAP_PATH
+
+
+def test_main_confirm_players_saves_back_to_the_player_map_it_read(tmp_path, stub_pipeline,
+                                                                   monkeypatch):
+    # Regression: the save used the hardcoded module default, so --player-map read one
+    # file and clobbered another (the standard party) with answers built from it.
+    stub_pipeline(WikiOutput(full="FULL", characters=["<pc objects>"]))
+    saved = {}
+    other = str(tmp_path / "other_party.json")
+    monkeypatch.setattr(main_mod, "confirm_player_map", lambda pcs, existing: [])
+    monkeypatch.setattr(main_mod, "save_player_map",
+                        lambda mapping, path: saved.update(path=path))
+    main_mod.main(["--files", "logs/a.txt", "--output", str(tmp_path / "wiki.md"),
+                   "--player-map", other, "--confirm-players"])
+    assert saved["path"] == other
+    assert saved["path"] != main_mod.PLAYER_MAP_PATH
 
 
 def test_main_does_not_confirm_without_the_flag(tmp_path, stub_pipeline, monkeypatch):

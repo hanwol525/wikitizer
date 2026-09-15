@@ -91,8 +91,10 @@ def _apply_prose(prose_agent, noun_dict, events):
 
     Called on POST-carve entities in the restricted doc, so it only ever sees facts that
     survived the exclusion, and the de-conflation map is built from the carved (public)
-    characters -- leak-safe by construction, like the History re-run. `noun_dict` is
-    keyed by NOUN_TYPES; `events` is the ordered HistoryEvent list.
+    characters -- leak-safe by construction, like the History re-run. That holds even
+    when stage 2 FAILS, because `filter_entities` clears each carved entity's `prose`:
+    the fallback body is the carved details, never the full doc's polished paragraph.
+    `noun_dict` is keyed by NOUN_TYPES; `events` is the ordered HistoryEvent list.
     """
     # --- Stage 1: deterministic de-conflation (pure; never an LLM call). ---
     try:
@@ -380,7 +382,9 @@ class Orchestrator:
         # RE-RUN over the messages minus the excluded files -- so a secret can't be
         # woven into a description, because the extractor never sees it. The prose pass
         # runs on the CARVED entities (post-exclusion), so it can only ever polish facts
-        # that survived -- leak-safe by construction, like the History re-run.
+        # that survived -- leak-safe by construction, like the History re-run. The carve
+        # also CLEARS each entity's full-doc `prose`, so a failed restricted polish falls
+        # back to the carved details rather than re-rendering the secret paragraph.
         restricted = None
         if exclude_sources:
             excluded = set(exclude_sources)   # bare filenames; validated above

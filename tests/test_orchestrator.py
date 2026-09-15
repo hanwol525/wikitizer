@@ -599,6 +599,86 @@ def test_prose_degrades_to_unpolished_on_failure(patched_parse, caplog):
                for r in caplog.records)
 
 
+class _FactsProse:
+    """A prose stub close enough to the real agent to catch the stale-prose leak: it
+    writes each body FROM THE FACTS IT IS GIVEN, and -- mirroring the real prompt's
+    "if an item has no facts, return an empty string" rule plus polish_entities'
+    falsy-body branch -- returns a factless item UNCHANGED. `fail_after_first_doc`
+    makes every call past the first document raise, which is the wider trigger: any
+    transient failure on a restricted prose call.
+
+    Both variants used to leak, because the carved entities still carried the FULL
+    doc's polished paragraph (written from the secret facts too) and the renderer
+    prefers `prose` over `details`. The carve now clears it.
+    """
+
+    NOUN_CALLS_PER_DOC = 5   # locations / characters / organizations / items / people
+
+    def __init__(self, fail_after_first_doc=False):
+        self.fail_after_first_doc = fail_after_first_doc
+        self.entity_calls = 0
+        self.event_calls = 0
+
+    def polish_entities(self, entities):
+        self.entity_calls += 1
+        if self.fail_after_first_doc and self.entity_calls > self.NOUN_CALLS_PER_DOC:
+            raise RuntimeError("boom: restricted prose")
+        out = []
+        for e in entities:
+            if not e.details:          # nothing to polish -> left un-polished
+                out.append(e)
+                continue
+            out.append(e.model_copy(update={"prose": " ".join(d.text for d in e.details)}))
+        return out
+
+    def polish_events(self, events):
+        self.event_calls += 1
+        if self.fail_after_first_doc and self.event_calls > 1:
+            raise RuntimeError("boom: restricted prose")
+        return [e.model_copy(update={"prose": e.description}) for e in events]
+
+
+def test_restricted_doc_never_reuses_full_doc_prose_for_a_factless_carved_entity(
+        patched_parse_multi):
+    # DETERMINISTIC leak path: every fact is secret but a PUBLIC quote keeps the entity
+    # alive, so the restricted polish is handed an item with no facts and correctly
+    # writes nothing -- and the stale full-doc paragraph would render in its place.
+    secret_bodied = Character(
+        name="Gandalf", name_sources=["group.txt"],
+        details=[det("Is secretly the Maia Olorin.", "secret.txt")],
+        supporting_quotes=[q("Gandalf wanders the wilds", "group.txt")],
+    )
+    orch = _StubbedOrchestrator(_StubNoise(),
+                                _extractors(characters=_StubExtractor([secret_bodied])),
+                                _StubReconciler(), prose=_FactsProse())
+    result = orch.run(["logs/group.txt", "logs/secret.txt"], _config(),
+                      exclude_sources=["secret.txt"])
+    assert "secretly the Maia Olorin" in result.full        # the polished full body has it
+    assert "Gandalf" in result.restricted                   # entity survives on its quote
+    assert "secretly the Maia Olorin" not in result.restricted
+
+
+def test_restricted_doc_never_reuses_full_doc_prose_when_its_polish_fails(patched_parse_multi):
+    # The WIDER trigger: one transient failure on any restricted prose call degrades the
+    # whole stage to the pre-polish objects. Those must be the CARVED ones with no prose,
+    # so the fallback body is the public details -- less polished, never leaky.
+    mixed = Character(
+        name="Gandalf", name_sources=["group.txt"],
+        details=[det("A wandering wizard.", "group.txt"),
+                 det("Is secretly the Maia Olorin.", "secret.txt")],
+        supporting_quotes=[q("Gandalf wanders the wilds", "group.txt")],
+    )
+    prose = _FactsProse(fail_after_first_doc=True)
+    orch = _StubbedOrchestrator(_StubNoise(),
+                                _extractors(characters=_StubExtractor([mixed])),
+                                _StubReconciler(), prose=prose)
+    result = orch.run(["logs/group.txt", "logs/secret.txt"], _config(),
+                      exclude_sources=["secret.txt"])
+    assert "secretly the Maia Olorin" in result.full
+    assert "A wandering wizard." in result.restricted       # fell back to the carved facts
+    assert "secretly the Maia Olorin" not in result.restricted
+
+
 def test_prose_runs_on_both_full_and_restricted(patched_parse_multi):
     # With exclusions, the prose pass runs on the full doc AND again on the carved
     # restricted doc: 2x (5 noun types) + 2x events.

@@ -55,7 +55,7 @@ python main.py --files logs/*.txt --exclude-sources dm.txt          # + a restri
 | `--current-year` | Present-day in-world year, to resolve relative dates ("200 years ago"). | `--current-year 1424` |
 | `--cache` | Reuse cached LLM responses for identical extractor/noise calls (gitignored `.llm_cache/`); cheap re-runs while debugging. | `--cache` |
 | `--no-player-map` | Opt out of the REQUIRED player map (party-less/test run; PCs may duplicate or mis-attribute). | `--no-player-map` |
-| `--confirm-players` | After the run, interactively assign a player to each discovered PC and save it; takes effect next run. (The step-2 builder is the richer path.) | `--confirm-players` |
+| `--confirm-players` | After the run, interactively assign a player to each discovered PC and save it back to `--player-map`; takes effect next run. Only the player is rewritten — each character's `main_name`/`last_name`/`aliases`/`pronouns` are preserved. (The step-2 builder is still the richer path for building one from scratch.) | `--confirm-players` |
 
 ## Input format
 The pipeline ingests **imessage-exporter TXT exports** — the structured TXT the [imessage-exporter](https://github.com/ReagentX/imessage-exporter) CLI writes (`imessage-exporter -f txt ...`). Each message carries its sender on its own line, so speaker attribution is exact (no alignment guessing) and reactions/attachments/receipts are stripped structurally. The exporter's own messages (`Me`) map to the `"exporter"` key in `config/speaker_map.json`; if you export with `--custom-name`, add that name to the speaker map. Phone-number handles match E.164 speaker-map keys even when prettily formatted.

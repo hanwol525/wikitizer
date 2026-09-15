@@ -259,6 +259,35 @@ def test_filter_entity_does_not_mutate_input():
     assert [qq.text for qq in e.supporting_quotes] == ["public", "secret"]
 
 
+# --- the carve always clears the full doc's polished prose -------------------
+
+def test_carve_clears_full_doc_prose():
+    # The prose agent polishes the FULL doc BEFORE the carve, so the object reaching
+    # _filter_entity can carry a paragraph written from every fact, secret ones
+    # included -- and the renderer PREFERS `prose` over `details`. Carrying it through
+    # would render the secret body under a carved entity, so the carve drops it.
+    e = Location(name="X", name_sources=["group.txt"],
+                 details=[det("public", "group.txt"), det("secret", "secret.txt")],
+                 supporting_quotes=[q("public", "group.txt")],
+                 prose="X is public AND is secretly a lich lair.")
+    kept = _filter_entity(e, {"secret.txt"})
+    assert kept.prose is None
+    assert e.prose is not None            # the full doc's copy is untouched
+
+
+def test_carve_clears_prose_even_when_every_detail_is_secret():
+    # The deterministic worst case: all details carved but a public quote keeps the
+    # entity alive, so the restricted re-polish is asked to write a body from NO facts
+    # and legitimately returns nothing. Without this, the stale full-doc prose renders.
+    e = Location(name="X", name_sources=["group.txt"],
+                 details=[det("secret", "secret.txt")],
+                 supporting_quotes=[q("public", "group.txt")],
+                 prose="X is secretly a lich lair.")
+    kept = _filter_entity(e, {"secret.txt"})
+    assert kept is not None and kept.details == []
+    assert kept.prose is None
+
+
 # --- filter_entities: the list wrapper --------------------------------------
 
 def test_filter_entities_drops_wholly_secret_and_maps_the_rest():
