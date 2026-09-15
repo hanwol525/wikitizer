@@ -37,11 +37,16 @@ DEFAULT_LLM_TIMEOUT_SECONDS = 300.0
 # high-volume classifier.
 DEFAULT_BIG_MODEL = "claude-sonnet-4-6"
 DEFAULT_CHEAP_MODEL = "claude-haiku-4-5-20251001"
+# The reconciler (merges + cross-type arbiter + timeline) does the pipeline's hardest
+# JUDGMENT work -- deciding what is the same entity, on one shot over the whole list --
+# and it's only ~9 calls/run (vs. the extractors that dominate spend), so it earns the
+# stronger model. Extraction stays "big" (Sonnet); the classifier stays "cheap" (Haiku).
+DEFAULT_RECONCILE_MODEL = "claude-opus-4-8"
 DEFAULT_MODELS = {
     "NOISE": DEFAULT_CHEAP_MODEL,
     "PROSE": DEFAULT_BIG_MODEL,
     "EXTRACT": DEFAULT_BIG_MODEL,
-    "RECONCILE": DEFAULT_BIG_MODEL,
+    "RECONCILE": DEFAULT_RECONCILE_MODEL,
 }
 
 # A model value starting with one of these routes to the OpenAI-compatible endpoint.

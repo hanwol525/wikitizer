@@ -56,7 +56,7 @@ def ch(name, is_pc=True, player="Hannah", aliases=None):
 
 def _groups_and_keys(player_map):
     pairs = declared_groups_with_players(player_map)
-    return [g for _, g in pairs], [p for p, _ in pairs]
+    return [g for _, _, g in pairs], [p for p, _, _ in pairs]
 
 
 PM = {"Hannah": ["CJ"]}

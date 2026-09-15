@@ -116,3 +116,26 @@ class PlacementDecision(BaseModel):
     """Call 2's whole reply. Any relative event not placed in any gap -> Could Not
     Place (position None). Implicit + safe, same as 4.1a's unlisted convention."""
     placements: list[GapPlacement] = Field(default_factory=list)
+
+
+# --- Cross-type resolution decision -----------------------------------------
+# After per-type reconcile, one real entity can appear under several types (a people
+# extracted as both a People AND a Location). An LLM arbiter decides which type(s) are
+# correct for each such name; Python folds the losers' facts into the winner and drops
+# the wrong-type pages. The LLM only names winning TYPE(s) per cluster -- it never
+# touches facts (Python does the folding), the same LLM-decides/Python-assembles split
+# as 4.1a.
+
+class TypeChoice(BaseModel):
+    """The correct type(s) for one cross-type conflict cluster."""
+    cluster: int             # the cluster id shown in the prompt (0-based)
+    keep_types: list[str] = Field(default_factory=list)
+                             # the type name(s) that correctly classify this entity, each
+                             # one of the types actually shown for that cluster. A realm
+                             # may legitimately keep BOTH "locations" and "organizations".
+
+
+class CrossTypeDecision(BaseModel):
+    """The whole arbiter reply: one TypeChoice per conflict cluster. A cluster the LLM
+    omits is left untouched (all its types kept) -- the safe, under-merge direction."""
+    choices: list[TypeChoice] = Field(default_factory=list)

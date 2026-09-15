@@ -169,28 +169,26 @@ def test_same_alias_on_two_entities_is_held_out_of_pool(caplog):
     assert REVIEW_PREFIX in caplog.text
 
 
-def test_identical_name_across_types_both_anchored_surface_held_out(caplog):
-    # The canonical scenario the pass-4 ambiguity branch is written for: a realm that
-    # is BOTH a Location (the place) and an Organization (the governing body), sharing
-    # one IDENTICAL name. Unlike test_slug_collision_suffixes_the_later_entity (two
-    # DIFFERENT names -- "Riverton"/"RIVERTON" -- that merely slug alike), here the
-    # name string itself is the same, so on top of the slug-suffixing we also hit the
-    # "two entities share the name" path and Pass 4's ambiguity hold-out.
+def test_identical_name_across_types_realm_dual_routes_to_location(caplog):
+    # A realm that is BOTH a Location (the place) and an Organization (the governing
+    # body), sharing one IDENTICAL name. Each entity still gets its own suffixed anchor,
+    # but the shared surface is NOT dropped: it's one real entity wearing two hats, so
+    # the surface routes to the LOCATION anchor and the realm stays linkable (mirroring
+    # the reconciler's locations-over-organizations cross-type tiebreak). This is the
+    # run-1.15 fix -- before, the dual lost every inbound link as "ambiguous".
     with caplog.at_level(logging.WARNING):
         cmap = build_crosslink_map([loc("Krieger Imperium"), org("Krieger Imperium")])
     # Each entity still gets its own distinct, suffixed anchor (correct in the
     # per-entity list even though the name->anchor dict can only hold the first).
     assert cmap.entity_anchors == ["krieger-imperium", "krieger-imperium-2"]
     assert cmap.anchors["Krieger Imperium"] == "krieger-imperium"
-    # The shared surface is genuinely ambiguous (claimed by both anchors), so it is
-    # held out of the source pool entirely -- no inbound link anywhere, by design.
-    assert "Krieger Imperium" not in surfaces(cmap)
+    # The shared surface survives, routed to the Location's canonical anchor.
+    assert ("Krieger Imperium", "krieger-imperium") in cmap.sources
     out = add_crosslinks("They marched on Krieger Imperium at dawn.", cmap, None)
-    assert out == "They marched on Krieger Imperium at dawn."  # nothing linked
-    # Both the shared-name and the ambiguity hold-out are flagged for a human.
-    assert REVIEW_PREFIX in caplog.text
+    assert out == "They marched on [Krieger Imperium](#krieger-imperium) at dawn."
+    # The shared-name collision is still flagged, but it is NOT dropped from the pool.
     assert "share the name" in caplog.text
-    assert "left out of the link pool" in caplog.text
+    assert "left out of the link pool" not in caplog.text
 
 
 def test_require_article_member_is_in_pool_but_article_required():
@@ -516,13 +514,16 @@ def test_left_word_boundary_does_not_fire_after_a_word_char():
     ):
         assert add_crosslinks(block, cmap, None) == block
 
-def test_two_entities_with_identical_name_drop_shared_surface_as_ambiguous(caplog):
-    # A realm that's both a Location AND an Organization, same exact name string.
+def test_two_same_type_entities_with_identical_name_drop_shared_surface_as_ambiguous(caplog):
+    # Two GENUINELY DIFFERENT same-named entities of ONE type (two unrelated "Riverton"
+    # towns) -- NOT a realm dual. Linking every mention to one arbitrarily is wrong half
+    # the time, so the shared surface is still dropped as ambiguous. Only an exact
+    # Location+Organization pair earns the run-1.15 canonical-anchor routing.
     with caplog.at_level(logging.WARNING):
-        cmap = build_crosslink_map([loc("Riverton"), org("Riverton")])
+        cmap = build_crosslink_map([loc("Riverton"), loc("Riverton")])
     assert cmap.entity_anchors == ["riverton", "riverton-2"]  # both anchored
     assert "Riverton" not in surfaces(cmap)  # shared surface dropped
-    assert REVIEW_PREFIX in caplog.text
+    assert "left out of the link pool" in caplog.text
 
 # --- loader ----------------------------------------------------------------- #
 

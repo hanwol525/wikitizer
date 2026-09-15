@@ -11,8 +11,8 @@ suite offline: no network, no API key, no `integration` marker.
 Two isolation seams are used on purpose:
   * `_build_agents` is overridden (the brief's seam) to swap in stub agents.
   * The pure parse+filter step lives directly in `run()` (not in an agent), so a
-    `monkeypatch` fixture replaces `orchestrator.parse_messages` /
-    `orchestrator.filter_reactions` with canned message output -- fully isolating
+    `monkeypatch` fixture replaces `orchestrator.parse_messages` with canned
+    message output -- fully isolating
     the orchestrator from the Phase 2 parser's file format. ONE additive test
     (`test_run_over_a_real_parsed_log`) skips that monkeypatch and feeds a real
     minimal log file instead, to lock down the real parse wiring (arg order).
@@ -133,6 +133,10 @@ class _StubReconciler:
             raise RuntimeError("boom: reconcile")
         return list(entries)
 
+    def resolve_cross_type(self, by_type):
+        # Pass-through (the real one runs an LLM arbiter); enough to test the wiring.
+        return by_type
+
     def order_history(self, events, current_year=None):
         self.order_called = True
         self.order_current_year = current_year   # captured so a test can assert threading
@@ -213,21 +217,19 @@ class _StubbedOrchestrator(Orchestrator):
 def patched_parse(monkeypatch):
     """Replace the pure parse+filter step so run() gets a canned, non-empty message
     list without any real file. Isolates the orchestrator from the parser format."""
-    def fake_parse(filepath, speaker_map, input_format="auto"):
+    def fake_parse(filepath, speaker_map):
         return [build_message("Alice", "Riverton sits on the river Mund.", "group.txt")]
     monkeypatch.setattr(orchestrator, "parse_messages", fake_parse)
-    monkeypatch.setattr(orchestrator, "filter_reactions", lambda msgs: list(msgs))
 
 
 @pytest.fixture
 def patched_parse_multi(monkeypatch):
     """Like patched_parse, but tags each message with its file's BARE name, so a
     multi-file `files` list yields multi-source messages (what exclusion needs)."""
-    def fake_parse(filepath, speaker_map, input_format="auto"):
+    def fake_parse(filepath, speaker_map):
         name = Path(filepath).name
         return [build_message("Alice", f"Content from {name}.", name)]
     monkeypatch.setattr(orchestrator, "parse_messages", fake_parse)
-    monkeypatch.setattr(orchestrator, "filter_reactions", lambda msgs: list(msgs))
 
 
 # --- 1. happy path ---------------------------------------------------------- #
@@ -354,22 +356,18 @@ def test_shared_client_threads_into_every_agent():
 # --- additive: real parse wiring (no monkeypatch) --------------------------- #
 
 def test_run_over_a_real_parsed_log(tmp_path, caplog):
-    """Additive hardening beyond the brief's 8 groups: skip the parse monkeypatch
-    and feed a REAL minimal group log, so the parse_messages -> (auto-detect ->
-    parse_chat_log) arg order and the filter_reactions wiring are exercised for real
-    (a swapped-arg regression the monkeypatched tests would mask). The legacy format
-    is auto-detected from its dashes row. Stubs still handle the agent layer."""
+    """Additive hardening beyond the brief's 8 groups: skip the parse monkeypatch and
+    feed a REAL minimal imessage-exporter log, so the real `parse_messages` arg order is
+    exercised (a swapped-arg regression the monkeypatched tests would mask). Stubs still
+    handle the agent layer."""
     caplog.set_level(logging.INFO)
     log = tmp_path / "group.txt"
-    # Minimal but valid group export: participant header (leads with a comma), the
-    # dashes row, a leading lone timestamp to seed the first message cleanly, one
-    # body line, then a complete phone footer that names the sender.
+    # Minimal but valid imessage-exporter export: a timestamp line, a sender line, then
+    # the body -- the two-line handshake the parser keys on.
     log.write_text(
-        ",+15551230000\n"
-        "----------------------------------------\n"
-        "01/01/2024 12:00:00\n"
-        "Riverton sits on the river Mund.\n"
-        "+15551230000 01/01/2024 12:00:05\n",
+        "May 17, 2022  5:29:42 PM\n"
+        "+15551230000\n"
+        "Riverton sits on the river Mund.\n",
         encoding="utf-8",
     )
     noise = _StubNoise()

@@ -17,6 +17,7 @@ characters discovered in a run; the saved party takes effect on the NEXT run.
 """
 
 import argparse
+import json
 import logging
 from pathlib import Path
 
@@ -25,7 +26,7 @@ from dotenv import load_dotenv
 from orchestrator import Orchestrator, PipelineConfig
 from speaker_map import load_speaker_map
 from renderer.crosslink import load_crosslink_words
-from player_map import load_player_map, save_player_map
+from player_map import declared_characters, load_player_map, save_player_map
 
 DEFAULT_OUTPUT_PATH = "output/wiki.md"   # output/ is gitignored -- a real-log wiki carries PII
 
@@ -72,21 +73,13 @@ def parse_args(argv=None):
     parser.add_argument(
         "--speaker-map", default=SPEAKER_MAP_PATH, metavar="PATH",
         help="Path to the speaker map JSON (default: %(default)s). Override to run a "
-             "different setup without touching the default -- e.g. a name-keyed "
-             "config/speaker_map.imessage.json for an imessage-exporter run alongside "
-             "your phone-keyed legacy map.",
+             "different setup without touching the default (built by "
+             "scripts/build_imessage_speaker_map.py).",
     )
     parser.add_argument(
         "--player-map", default=PLAYER_MAP_PATH, metavar="PATH",
         help="Path to the declared-party JSON (default: %(default)s). Override to point "
              "at a different party file (same reason as --speaker-map).",
-    )
-    parser.add_argument(
-        "--input-format", choices=["auto", "imessage", "legacy"], default="auto",
-        help="Chat-log format of --files: 'imessage' (a structured imessage-exporter "
-             "TXT export), 'legacy' (the copy-pasted iMessage .txt), or 'auto' "
-             "(default: sniff each file). The two are trivially distinguishable, so "
-             "'auto' is right for almost everyone.",
     )
     parser.add_argument(
         "--current-year", type=int, default=None, metavar="YEAR",
@@ -110,6 +103,12 @@ def parse_args(argv=None):
              "plays a character can't be inferred reliably, so this is how you declare it. "
              "The saved party takes effect on the NEXT run (it drives extraction + merge). "
              "Off by default (a normal run is non-interactive).",
+    )
+    parser.add_argument(
+        "--no-player-map", action="store_true",
+        help="Run WITHOUT a declared party. The player map is normally REQUIRED (build it "
+             "with scripts/build_player_map.py); this is a deliberate opt-out for a "
+             "party-less/test run, and PCs may then duplicate or be mis-attributed.",
     )
     args = parser.parse_args(argv)
     # Fail cheap: an existing-directory --output would only blow up at write_text time,
@@ -142,15 +141,27 @@ def restricted_path(output) -> Path:
 
 
 def confirm_player_map(pcs, existing, input_fn=input, print_fn=print) -> dict:
-    """Interactively confirm/correct the player of each discovered PC and return an
-    updated ``{player: [character name, alias, ...]}`` map (merged with ``existing``).
+    """Interactively confirm/correct the player of each discovered PC and return an updated
+    ``{player: [character name, alias, ...]}`` map (merged with ``existing``). The FIRST name
+    in each list is the character's canonical name (its heading) -- i.e. the ``main_name``;
+    ``save_player_map`` writes it out in the object form ``{"main_name", "aliases"}``.
 
     Pure except for the injected ``input_fn``/``print_fn`` (defaults to builtins), so it
     unit-tests without real stdin. Per character: Enter keeps its current player, a typed
     name (re)assigns it, ``-`` skips it. A reassigned character's names are moved off any
     previous player so the map can't hold the same name under two people.
+
+    ``existing`` may be the new list form or an old dict-keyed map -- both normalize to a
+    working ``{player: [names]}`` here. NOTE: this convenience path collapses to ONE
+    character per player (a player's several declared PCs merge); use
+    ``scripts/build_player_map.py`` for the rich multi-PC / last-name / pronouns build.
     """
-    result = {p: list(names) for p, names in existing.items()}
+    result = {}
+    for dc in declared_characters(existing):
+        names = result.setdefault(dc.player, [])
+        for n in [dc.main_name, *dc.aliases]:
+            if n and n not in names:
+                names.append(n)
 
     def _remove(names_lower):
         for p in list(result):
@@ -197,30 +208,51 @@ def main(argv=None) -> None:
     # Pull .env into the environment so the Anthropic SDK finds ANTHROPIC_API_KEY.
     load_dotenv()
 
-    # Load BOTH config files up front. If either is missing/malformed this raises
-    # HERE -- before any paid LLM call -- which is exactly what we want (fail cheap).
+    # Load the config files up front -- before any paid LLM call (fail cheap). A missing /
+    # malformed file becomes a friendly, actionable SystemExit, NOT a raw traceback.
+    try:
+        speaker_map = load_speaker_map(args.speaker_map)
+    except FileNotFoundError:
+        raise SystemExit(
+            f"Speaker map not found: {args.speaker_map}\n"
+            f"Build it first:\n"
+            f"    python scripts/build_imessage_speaker_map.py logs/*.txt\n"
+            f"Or point --speaker-map at yours, e.g. "
+            f"--speaker-map config/speaker_map.imessage.json"
+        )
+    except json.JSONDecodeError as exc:
+        raise SystemExit(f"Speaker map {args.speaker_map} is not valid JSON: {exc}")
+    try:
+        # The declared party (gitignored). Missing -> [] (the gate below decides); a
+        # malformed shape raises ValueError -> a friendly rebuild hint here.
+        player_map = load_player_map(args.player_map)
+    except ValueError as exc:
+        raise SystemExit(f"Player map {args.player_map} is malformed: {exc}\n"
+                         f"Rebuild it: python scripts/build_player_map.py")
+
     config = PipelineConfig(
-        speaker_map=load_speaker_map(args.speaker_map),
+        speaker_map=speaker_map,
         crosslink_words=load_crosslink_words(CROSSLINK_WORDS_PATH),
         current_year=args.current_year,
-        # The declared party (gitignored, may be absent -> {}). Assigns player_name
-        # authoritatively and merges each player's declared aliases as one character.
-        player_map=load_player_map(args.player_map),
-        input_format=args.input_format,
+        player_map=player_map,
     )
 
-    # Player/character disambiguation is only as good as the declared party. With no
-    # config/player_map.json, the LLM's player guesses are un-anchored -- Sam/Kriggy-style
-    # conflations and duplicate PC pages become far more likely. Warn LOUDLY (but do not
-    # abort: a fresh clone / the synthetic path can still run) so the user knows to create
-    # it. This is the soft "requirement": when the map IS present it is the source of truth
-    # (the extractor drops any LLM player guess for an undeclared character).
+    # Player/character disambiguation is only as good as the declared party, so the map is a
+    # HARD, step-1 requirement -- refuse to run without it (before any paid call), unless the
+    # user consciously opts out with --no-player-map. When the map IS present it's the source
+    # of truth (the extractor drops any LLM player guess for an undeclared character).
+    if not config.player_map and not args.no_player_map:
+        raise SystemExit(
+            f"No declared party found ({args.player_map} is missing or empty).\n"
+            f"Build it first:\n"
+            f"    python scripts/build_imessage_speaker_map.py logs/*.txt\n"
+            f"    python scripts/build_player_map.py\n"
+            f"Or pass --no-player-map to run without one (PCs may duplicate or be mis-attributed)."
+        )
     if not config.player_map:
         logging.getLogger(__name__).warning(
-            "[REVIEW] No player_map configured (%s is missing or empty); character/player "
-            "disambiguation is disabled and PCs may duplicate or be mis-attributed. Create "
-            "it (see --confirm-players) to make the declared party the source of truth.",
-            PLAYER_MAP_PATH,
+            "[REVIEW] Running with NO declared party (--no-player-map); character/player "
+            "disambiguation is disabled and PCs may duplicate or be mis-attributed.",
         )
 
     # A bad --exclude-sources name raises ValueError from inside run(), before any

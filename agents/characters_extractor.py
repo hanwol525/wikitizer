@@ -43,7 +43,7 @@ from pydantic import ValidationError
 from agents.base_extractor import BaseExtractor
 from models.lore import Alias, Character, Detail
 from models.message import Message
-from player_map import build_character_lookup
+from player_map import build_character_lookup, build_pronoun_lookup, declared_characters
 
 logger = logging.getLogger(__name__)
 
@@ -58,6 +58,8 @@ SYSTEM_PROMPT = """You are a worldbuilding extractor for an exported D&D group c
 CRITICAL — players vs characters. The following names are the REAL PEOPLE playing this game: __PLAYER_ROSTER__
 - DEFAULT: treat any of those names as the real person (the player), not a character. A message that mentions a real person by name is usually about the CHARACTER that person plays, not a character named after them. Example: "Sam plays Kriggy" means the real person Sam controls the character named Kriggy — so the character's name is "Kriggy", and Sam is recorded as the player, never as a character. And plain table talk about a real person is not a character at all: "Sam, you free Thursday?" is the human Sam sorting out scheduling — extract nothing from it.
 - EXCEPTION: a character really can share a name with a real person — by coincidence, or because a player named their character after someone at the table as a joke. So if the context clearly shows a roster name is being used as a CHARACTER — someone acting in-character, an NPC by that name introduced in the world ("we hired a sellsword named Sam at the docks"), or the players explicitly flagging "the character, not the person" — then DO extract it as a character. Set name to that shared name, and set player_name to whoever actually plays them (which is usually NOT the person of the same name, since you don't play yourself; for an NPC, use null).
+
+DECLARED PRONOUNS — ground truth from the group: __DECLARED_PRONOUNS__. When you author a "detail" about one of these characters, phrase it with THEIR declared pronouns throughout, regardless of which pronoun the chat happened to use (the detail wording is yours, so it is in-scope to fix). A verbatim "quote" is still copied EXACTLY and never altered. For any character NOT listed here, use whatever pronoun the chat states.
 
 For each named character, extract:
 - name: the character's in-world (fictional) name. If the text indicates the character has a REAL/true/actual/birth name AND a separate assumed name they go by — an alias, cover, or fake name they "give to others" — use the REAL name here and record the assumed name as an alias, even if the assumed name is used more often.
@@ -77,9 +79,10 @@ Hard rules:
 - Do NOT invent characters, details, or quotes. Every detail must be supported by a real quote from a real message.
 - Do NOT paraphrase quotes. The "detail" is yours to phrase; the "quote" must be copied exactly. Each quote is automatically checked against the message you cite in source_id; if it cannot be found there word-for-word, that detail is thrown away — so copy carefully and cite the right id.
 - Only use facts actually stated in the messages. If something is implied but not stated, leave it out.
-- Attach each detail ONLY to the character it is explicitly about. Do NOT transfer a fact, relationship, or trait from one character to another, and do NOT infer a relationship that was not stated. When a message states a relationship (e.g. "X is Y's uncle"), record it only for the character who is its stated subject and keep the direction exactly as stated — do not flip it or reassign it to a different character.
+- Attach each detail ONLY to the character it is explicitly about — the GRAMMATICAL SUBJECT of the statement. Do NOT transfer a fact, relationship, or trait from one character to another, and do NOT infer a relationship that was not stated. When a message states a relationship (e.g. "X is Y's uncle"), record it only for the character who is its stated subject and keep the direction exactly as stated — do not flip it or reassign it to a different character. A statement whose subject is a DIFFERENT person belongs on THAT person, never on the character you are currently describing: e.g. "CJ thinks Aerin is the only cool one in the party" is a fact about CJ, so do NOT fold it into Aerin's details as though Aerin said or did it. A single message often names two characters — put each fact under its own subject.
 - A character can be mentioned across several messages; pull details (and any aliases) from wherever they appear. Do not try to merge duplicate characters or unify their names across separate mentions beyond choosing a reasonable canonical name and the aliases a message clearly gives — the rest of the merging is handled later.
 - If a character is named but no facts are stated, you may still include them with an empty details list.
+- SELF-CHECK before you output: re-read every detail under each character and confirm its grammatical SUBJECT is that character. If a detail is actually about a DIFFERENT named person, remove it from this character (it belongs to that other person's entry, or to nowhere). Dropping a mis-attributed fact is better than putting it on the wrong character's page.
 
 INPUT: a JSON array of messages, each an object with an integer "id" and a string "content".
 
@@ -135,12 +138,23 @@ class CharactersExtractor(BaseExtractor):
         # Instance attribute on purpose: BaseExtractor._extract_batch reads
         # self.system_prompt, and an instance attr quietly takes precedence over
         # the class-level one LocationsExtractor uses -- zero base changes needed.
-        self.system_prompt = SYSTEM_PROMPT.replace("__PLAYER_ROSTER__", roster_str)
+        # Declared-pronoun guide for the prompt (main_name: pron/pron; ...) so the model can
+        # author details with the right pronouns. Byte-stable for a fixed config, like the
+        # roster. .replace() (not .format()) for the same brace-safety reason as the roster.
+        _guide = "; ".join(f"{dc.main_name}: {'/'.join(dc.pronouns)}"
+                           for dc in declared_characters(player_map or [])) or "(none declared)"
+        self.system_prompt = (SYSTEM_PROMPT
+                              .replace("__PLAYER_ROSTER__", roster_str)
+                              .replace("__DECLARED_PRONOUNS__", _guide))
         # Lowercased set for the case-insensitive player_name check + name-collision flag.
         self._roster_lookup = {n.strip().lower() for n in clean_names}
         # Authoritative character-name -> player lookup from the declared party (may be
         # empty). Normalized (strip+lower) keys, matching _roster_lookup's convention.
         self._character_to_player = build_character_lookup(player_map or {})
+        # Parallel character-name -> declared pronouns lookup, so a detail about a declared
+        # character is authored with THAT character's pronouns (ground truth), not the
+        # chat's. Empty for a non-declared character (no override).
+        self._character_to_pronouns = build_pronoun_lookup(player_map or {})
         # Typo catch: a declared player who isn't a known real person is almost
         # certainly a config mistake -- warn once, but don't reject (the user's config
         # is the authority, and an over-strict rejection would just hide their edit).
@@ -163,6 +177,18 @@ class CharactersExtractor(BaseExtractor):
                 if hit is not None:
                     return hit
         return None
+
+    def _declared_pronouns_for(self, name, aliases) -> list:
+        """The declared pronouns for this character (by NAME or any alias), else ``[]``.
+        Same normalized match as :meth:`_declared_player_for`."""
+        if not self._character_to_pronouns:
+            return []
+        for cand in [name] + [a.text for a in aliases]:
+            if isinstance(cand, str):
+                hit = self._character_to_pronouns.get(cand.strip().lower())
+                if hit is not None:
+                    return list(hit)
+        return []
 
     def _build_entry(self, raw: dict, batch: list[Message]) -> Optional[Character]:
         """Build one :class:`Character` from a single response object, or ``None``
@@ -281,6 +307,7 @@ class CharactersExtractor(BaseExtractor):
                 aliases=aliases,
                 is_pc=is_pc,
                 player_name=player_name,
+                pronouns=self._declared_pronouns_for(name, aliases),
                 details=details_out,
                 supporting_quotes=quotes_out,
             )
