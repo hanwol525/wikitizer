@@ -31,9 +31,13 @@ def silent(*a, **k):
 
 
 def entry(player, main_name, last_name=None, aliases=None, pronouns=None):
-    """One canonical entry, with the defaults the loader/normalizer fills in."""
+    """One canonical entry. An OMITTED ``pronouns`` gets the loader's they/them default;
+    an explicit ``[]`` stays empty -- a newly discovered PC with no extraction-time
+    pronouns keeps ``[]`` (``confirm_player_map`` defers the they/them default to the
+    loader), so ``or`` here would wrongly promote that explicit empty to they/them."""
     return {"player": player, "main_name": main_name, "last_name": last_name,
-            "aliases": list(aliases or []), "pronouns": list(pronouns or ["they", "them"])}
+            "aliases": list(aliases or []),
+            "pronouns": ["they", "them"] if pronouns is None else list(pronouns)}
 
 
 # --- behavior --------------------------------------------------------------- #
