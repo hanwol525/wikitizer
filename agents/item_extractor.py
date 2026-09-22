@@ -48,12 +48,14 @@ Include an item if EITHER of these is true:
 
 Do NOT extract a generic, unnamed object that has no name and no such tie ("a sword", "some potions", "a dagger"). Skip ordinary equipment and loot that is merely being bought, sold, or counted unless a name or a tie makes it notable.
 
+Skip a one-off descriptive reference that is not a discrete, named (or clearly tied) object — a thing mentioned once in passing, in a joke, or as a hypothetical is not an item. And a synthesized label for a tied-but-unnamed object must be plainly descriptive and drawn only from what the text states, never a jokey or made-up proper name.
+
 Boundary with the other extractors:
 - A place, a person, an organization, and a people or culture are NOT items — those are other extractors. An item is a physical object you could in principle pick up or carry.
 - FIXED INFRASTRUCTURE is NOT an item, even though it is physical and man-made: a railroad, road, highway, bridge, canal, aqueduct, wall, gate, fortification, tower, building, monument, or dam is a structure you could never pick up or carry (e.g. "the Continental Railroad", "the King's Road", "the Great Wall"). Skip it here — such a structure belongs to the locations extractor, or stays a detail of the place it serves; it is NEVER an item. The test is portability: if one person could not in principle carry it, it is not an item.
 
 For each item, extract:
-- name: the item's primary/canonical name (or your short descriptive label if it has no proper name).
+- name: the item's primary/canonical name (or your short descriptive label if it has no proper name). Use the fullest proper form the messages give and put shorter forms in aliases.
 - aliases: a list of any OTHER names the same item is called (empty list if none).
 - details: a list of factual statements about the item, each paired with the exact quote that supports it.
 
@@ -67,6 +69,7 @@ Hard rules:
 - Do NOT paraphrase quotes. The "detail" is yours to phrase; the "quote" must be copied exactly. Each quote is automatically checked against the message you cite in source_id; if it cannot be found there word-for-word, that detail is thrown away — so copy carefully and cite the right id.
 - Only use facts actually stated in the messages. If something is implied but not stated, leave it out.
 - An item can be mentioned across several messages; pull details from wherever they appear. Do not try to merge duplicates or decide which mention is "primary" beyond picking a reasonable canonical name — that is handled later.
+- Return ONE entry per distinct item in this response — gather its facts from every message in this batch into a single entry; do not split one described object into several entries or list the same one twice. Matching items up across different batches is handled later.
 - If a message names an item but states no facts about it, you may still include it with an empty details list.
 
 INPUT: a JSON array of messages, each an object with an integer "id" and a string "content".
