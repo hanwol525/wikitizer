@@ -367,13 +367,16 @@ def _resolve_canonical(members, canonical):
     stored value: a member NAME if one matches (the heading should be a real name),
     else a matching alias. Falls back to the given canonical unchanged if nothing
     matches (validation should already have rejected that case)."""
-    key = canonical.strip().lower()
+    # Fold via _name_key (the same fold the deterministic floors use) so a straight-vs-
+    # curly quote -- or accent/apostrophe/case -- variant still matches its own member.
+    # The fold is for LOOKUP only; we always return the verbatim stored string.
+    key = _name_key(canonical)
     for m in members:
-        if m.name.strip().lower() == key:
+        if _name_key(m.name) == key:
             return m.name
     for m in members:
         for a in m.aliases:
-            if a.text.strip().lower() == key:
+            if _name_key(a.text) == key:
                 return a.text
     return canonical
 
@@ -609,6 +612,74 @@ def _merge_article_variants(entries, label):
                     REVIEW_PREFIX, label, len(members), merged.name,
                     ", ".join(m.name for m in members))
         out.append(merged)
+    return out
+
+
+def _merge_unique_subset_names(entries, label):
+    """Force-merge a fragment entry into its UNIQUE containing entity -- a structural
+    signal the LLM won't assert from facts alone ("Mundi"/"The Lake" -> "Lake Mundi"
+    when Opus declined to merge them, correctly refusing to invent that identity from
+    the facts). Fold A into B iff A's name tokens are a PROPER subset of B's tokens AND
+    B is the ONLY entity of this type A is a subset of. Zero or >=2 candidate supersets
+    -> skip A: that uniqueness gate blocks the dangerous ambiguous cases ("Krieger" is a
+    subset of many Krieger entities; "Emperor" of many emperors; "Dwarves" of many
+    subgroups). The fuller/superset name wins the heading; each fragment name becomes an
+    alias (so it still feeds the crosslink pool). Runs AFTER _merge_article_variants on
+    the post-decision result, first-seen order preserved. Skipped for HistoryEvent (event
+    names are model-generated LABELS). A short fragment (<= SHORT_NAME_LEN, e.g. initials
+    like "CJ") is never folded, and a Character player_name clash still vetoes via
+    _combine_group -> two different same-named PCs stay separate.
+
+    Every fold is [REVIEW]-logged: a unique superset is a strong signal, not proof
+    ("Free Islands" c "Dwarven Free Islands" uniquely could be region-vs-part), so a
+    bad fold must be caught on review -- and if a bad class appears the fix is to
+    tighten the token rule, never to widen it."""
+    if not entries or isinstance(entries[0], HistoryEvent):
+        return list(entries)
+    n = len(entries)
+    tokens = [set(_strip_article(_name_key(e.name)).split()) for e in entries]
+    # fold_target[i] = j: fragment i folds into its unique containing entity j.
+    fold_target = {}
+    for i, e in enumerate(entries):
+        if not tokens[i]:                               # all-punctuation name -> never a fragment
+            continue
+        if len(e.name.strip()) <= SHORT_NAME_LEN:       # never fuzzy-fold initials ("CJ")
+            continue
+        supers = [j for j in range(n) if j != i and tokens[i] < tokens[j]]  # PROPER subset
+        if len(supers) == 1:                            # unique containing entity -> fold
+            fold_target[i] = supers[0]
+    if not fold_target:
+        return list(entries)
+    # The uniqueness gate makes fold-chains impossible (A<B<C would give A two supersets
+    # -> A skipped), so targets and fragments are disjoint. Defensively drop any edge from
+    # an index that is itself a target, so a stray chain can never build a bad group.
+    targets = set(fold_target.values())
+    fold_target = {i: t for i, t in fold_target.items() if i not in targets}
+    targets = set(fold_target.values())
+    frags = {t: [] for t in targets}
+    for i in sorted(fold_target):                       # ascending -> stable fragment order
+        frags[fold_target[i]].append(i)
+    consumed = set(fold_target)
+    out = []
+    for i, e in enumerate(entries):
+        if i in consumed:
+            continue                                    # folded into its target below
+        if i in targets:
+            members = [entries[i]] + [entries[f] for f in frags[i]]
+            try:
+                merged = _combine_group(members, entries[i].name)
+            except _VetoMerge as veto:
+                logger.warning("%s Reconciler[%s]: unique-subset fold of %s vetoed -- %s; "
+                               "kept separate.", REVIEW_PREFIX, label,
+                               [m.name for m in members], veto.message)
+                out.extend(members)
+                continue
+            for f in frags[i]:
+                logger.warning("%s Reconciler[%s]: unique-subset fold %r -> %r.",
+                               REVIEW_PREFIX, label, entries[f].name, entries[i].name)
+            out.append(merged)
+        else:
+            out.append(e)
     return out
 
 
@@ -968,12 +1039,15 @@ def _validate_decision(decision, entries):
             else:
                 seen.add(idx)
                 valid.append(idx)
-        # canonical must appear among the (valid) members' names/aliases
+        # canonical must appear among the (valid) members' names/aliases. Fold via
+        # _name_key (the deterministic floors' fold) so a straight-vs-curly quote variant
+        # of a real member name isn't rejected as "invented" -- the CJ bug, where Opus
+        # emitted a straight-quote canonical for a curly-quote member and burned 3 retries.
         allowed = set()
         for idx in valid:
-            allowed.add(entries[idx].name.strip().lower())
-            allowed.update(a.text.strip().lower() for a in entries[idx].aliases)
-        if valid and group.canonical.strip().lower() not in allowed:
+            allowed.add(_name_key(entries[idx].name))
+            allowed.update(_name_key(a.text) for a in entries[idx].aliases)
+        if valid and _name_key(group.canonical) not in allowed:
             problems.append(
                 f"merge {gi}: canonical {group.canonical!r} is not a name/alias of any member"
             )
@@ -1009,9 +1083,9 @@ def _valid_merge_subset(decision, entries, label):
         else:
             allowed = set()
             for idx in members:
-                allowed.add(entries[idx].name.strip().lower())
-                allowed.update(a.text.strip().lower() for a in entries[idx].aliases)
-            if group.canonical.strip().lower() not in allowed:
+                allowed.add(_name_key(entries[idx].name))
+                allowed.update(_name_key(a.text) for a in entries[idx].aliases)
+            if _name_key(group.canonical) not in allowed:
                 problems.append(f"canonical {group.canonical!r} is not a member name/alias")
         if problems:
             logger.warning(
@@ -1762,10 +1836,13 @@ class Reconciler(BaseAgent):
         # Deterministic floors over the LLM's result: (1) force-merge any same-name
         # entries the model silently left separate (a no-op when it merged everything),
         # (2) force-merge pure-article variants ("The Citadel"/"Citadel") the model left
-        # split, then (3) force-merge the Character entries the user DECLARED as one
-        # character in the player_map. All run on the merged output, so no index conflict.
+        # split, (3) collapse a name-fragment into its UNIQUE containing entity
+        # ("Mundi"/"The Lake" -> "Lake Mundi") the model declined to assert, then (4)
+        # force-merge the Character entries the user DECLARED as one character in the
+        # player_map. All run on the merged output, so no index conflict.
         merged = _merge_identical_names(self._apply(decision, entries, label), label)
         merged = _merge_article_variants(merged, label)
+        merged = _merge_unique_subset_names(merged, label)
         # Names the LLM parked as possible-but-NOT-merged duplicates (indices into the
         # ORIGINAL entries; a name survives the merges as either a name or an alias). The
         # declared floor's fuzzy folds (typo/token) skip these so a deterministic merge
