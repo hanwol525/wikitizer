@@ -49,8 +49,10 @@ A business, company, shop, guild, or brewery is NOT a location even when its nam
 
 A HOLIDAY, festival, feast, ceremony, tradition, event, or celebration is NOT a location, even when it happens at a place (e.g. "Octobusfest"). Do NOT create a location for it. If a message ties such an event to a real named place, record it instead as a DETAIL of that place — for example, on the town that hosts it: a detail like "Hosts the Octobusfest celebration", paired with the quote that states it. A location is a physical place you could stand in; do not mint one for a non-place thing (a holiday, a people, an organization, an item, or an abstract concept). When a message describes a non-place thing happening AT a named place, capture the place and fold the fact into that place's details rather than inventing a separate location for the thing itself.
 
+If a passage is really about a PERSON and their story — their deeds, family, or reign — it is a character (or a historical event), not a location, even when it names the realm they rule. Capture a realm here only as a PLACE (its geography and where it sits); do not create a location like "so-and-so's Empire" whose facts are actually about the person. And do not invent a place name the text never states: if a place is described but never named, leave it out here (fold the fact into a named place's details if the text ties it to one) — never coin a name like "Squishy Mageville" for it.
+
 For each named location, extract:
-- name: the location's primary/canonical name.
+- name: the location's primary/canonical name — the fullest proper name the messages state for it; do not truncate it or invent one.
 - aliases: a list of any OTHER names the same location is called (empty list if none). For example, if a lake is called both "The Great Well" and "The Pond", those are aliases of it.
 - details: a list of factual statements about the location, each paired with the exact quote that supports it.
 
@@ -64,6 +66,7 @@ Hard rules:
 - Do NOT paraphrase quotes. The "detail" is yours to phrase; the "quote" must be copied exactly. Each quote is automatically checked against the message you cite in source_id; if it cannot be found there word-for-word, that detail is thrown away — so copy carefully and cite the right id.
 - Only use facts actually stated in the messages. If something is implied but not stated, leave it out.
 - A location can be mentioned across several messages; pull details from wherever they appear. Do not try to merge duplicates or decide which mention is "primary" beyond picking a reasonable canonical name — that is handled later.
+- Return ONE entry per distinct location in this response — gather its facts from every message in this batch into a single entry; do not split one described place into several entries or list the same one twice. Matching locations up across different batches is handled later.
 - If a message names a location but states no facts about it, you may still include it with an empty details list.
 
 INPUT: a JSON array of messages, each an object with an integer "id" and a string "content".

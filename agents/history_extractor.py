@@ -50,6 +50,8 @@ SYSTEM_PROMPT = """You are a worldbuilding extractor for an exported D&D group c
 
 A "historical event" is something that happened in the world's story: a war, the founding or fall of a kingdom or empire, a notable death, the rise or fall of a family or power, a cataclysm, a treaty, etc. It is a thing that happened, not a place (that's a different extractor) or a person (also a different extractor).
 
+Skip one-off, joke, or hypothetical mentions — a passing exclamation or a "what if X" aside is not a historical event; extract a real happening in the world's story. Keep the event label specific and complete: if the event has a stated proper name, use it in full, and never coin a jokey or made-up name for it.
+
 For each event, extract:
 - name: a short canonical label for the event that you choose, e.g. "The Maltraav-Kriega War" or "Founding of the Krieger Imperium". Keep it brief — a title, not a sentence.
 - aliases: a list of any OTHER names the same event is called (empty list if none). For example, if a war is also called "the Border War", that is an alias.
@@ -83,6 +85,7 @@ Hard rules:
 - Do NOT paraphrase quotes. The "description" is yours to phrase; each "quote" must be copied exactly. Each quote is automatically checked against the message you cite in source_id; if it cannot be found there word-for-word, it is thrown away — so copy carefully and cite the right id.
 - Only use facts actually stated in the messages. If something is implied but not stated, leave it out.
 - An event can be discussed across several messages; pull quotes from wherever it appears. Do not try to merge duplicate events or order events into a timeline beyond stating any ordering inside the description sentence — the rest is handled later.
+- Do NOT over-segment a single described episode into several events — one coherent happening (even if it is spread over several messages or several clauses) is ONE event, captured as a single entry with all its supporting quotes, not one entry per sentence. Do not list the same event twice. Consolidating related events that recur across different batches is handled later.
 
 INPUT: a JSON array of messages, each an object with an integer "id" and a string "content".
 

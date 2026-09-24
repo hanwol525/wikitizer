@@ -367,13 +367,16 @@ def _resolve_canonical(members, canonical):
     stored value: a member NAME if one matches (the heading should be a real name),
     else a matching alias. Falls back to the given canonical unchanged if nothing
     matches (validation should already have rejected that case)."""
-    key = canonical.strip().lower()
+    # Fold via _name_key (the same fold the deterministic floors use) so a straight-vs-
+    # curly quote -- or accent/apostrophe/case -- variant still matches its own member.
+    # The fold is for LOOKUP only; we always return the verbatim stored string.
+    key = _name_key(canonical)
     for m in members:
-        if m.name.strip().lower() == key:
+        if _name_key(m.name) == key:
             return m.name
     for m in members:
         for a in m.aliases:
-            if a.text.strip().lower() == key:
+            if _name_key(a.text) == key:
                 return a.text
     return canonical
 
@@ -609,6 +612,146 @@ def _merge_article_variants(entries, label):
                     REVIEW_PREFIX, label, len(members), merged.name,
                     ", ".join(m.name for m in members))
         out.append(merged)
+    return out
+
+
+def _surface_keys(entity):
+    """Article-stripped name keys of an entity's name AND every alias -- every surface
+    form it answers to. Blank keys (all-punctuation) are dropped."""
+    keys = {_strip_article(_name_key(entity.name))}
+    keys.update(_strip_article(_name_key(a.text)) for a in entity.aliases)
+    keys.discard("")
+    return keys
+
+
+def _share_quote(a, b):
+    """True when two entities cite at least one identical supporting quote (the same
+    (text, speaker, source_file) triple `_dedup_quotes` keys on) -- the same chat line
+    backing both is hard evidence they describe one thing."""
+    qa = {(q.text, q.speaker, q.source_file) for q in a.supporting_quotes}
+    return any((q.text, q.speaker, q.source_file) in qa for q in b.supporting_quotes)
+
+
+def _declined_name_pairs(entries, decision):
+    """Name pairs the LLM was SHOWN as possible duplicates and did NOT merge -- the
+    advisory `_candidate_pairs` list (recomputed deterministically from the same entries,
+    so it matches what the user message carried) minus pairs that landed in one merge
+    group, plus every pair the LLM parked in `possible_duplicates`. Returned as
+    frozensets of article-stripped name keys: a name survives the merges as either a
+    name or an alias, so post-merge entities are matched by surface key, not index."""
+    group_of = {}
+    for g, mg in enumerate(decision.merges):
+        for i in mg.members:
+            group_of[i] = g
+    pairs = set()
+
+    def _add(i, j):
+        if not (0 <= i < len(entries) and 0 <= j < len(entries)):
+            return
+        ki = _strip_article(_name_key(entries[i].name))
+        kj = _strip_article(_name_key(entries[j].name))
+        if ki and kj and ki != kj:
+            pairs.add(frozenset((ki, kj)))
+
+    for i, j, _reason in _candidate_pairs(entries):
+        if group_of.get(i, -1 - i) != group_of.get(j, -1 - j):  # not merged together
+            _add(i, j)
+    for pd in decision.possible_duplicates:
+        for a in range(len(pd.members)):
+            for b in range(a + 1, len(pd.members)):
+                _add(pd.members[a], pd.members[b])
+    return pairs
+
+
+def _merge_unique_subset_names(entries, label, declined_pairs=None):
+    """Force-merge a fragment entry into its UNIQUE containing entity ("Mundi" ->
+    "Lake Mundi") -- but ONLY on corroborating evidence, never on token shape alone.
+    Fold A into B iff ALL of:
+
+      * A's name tokens are a PROPER subset of the tokens of B's name OR one of B's
+        aliases, AND B is the ONLY entity of this type whose name/aliases contain A's
+        tokens. Zero or >=2 candidate supersets -> skip A. Aliases count, so a superset
+        the LLM already merged into another page ("White Tower" now an alias of
+        "Citadel") still makes a bare "Tower" ambiguous.
+      * EVIDENCE links them: A's name is already one of B's aliases (or B's name one of
+        A's), or A and B cite an identical supporting quote. A unique token subset alone
+        is NOT identity -- "Free Islands"/"Dwarven Free Islands", "Elves"/"High Elves",
+        "Krieger"/"Krieger Imperium" (the KIND trap) all pass the token test and are
+        different things.
+      * The LLM did NOT decline the pair: a pair it was shown in the candidate advisory
+        and left unmerged, or parked in possible_duplicates (`declined_pairs`, from
+        `_declined_name_pairs`), is its considered keep-separate call and is respected.
+
+    The fuller/superset name wins the heading; each fragment name becomes an alias.
+    Runs AFTER _merge_article_variants on the post-decision result, first-seen order
+    preserved. Skipped for HistoryEvent (event names are model-generated LABELS). A
+    short fragment (<= SHORT_NAME_LEN, e.g. initials like "CJ") is never folded, and a
+    Character player_name clash still vetoes via _combine_group. Every fold is
+    [REVIEW]-logged. If a bad class appears the fix is to tighten this rule, never to
+    widen it."""
+    if not entries or isinstance(entries[0], HistoryEvent):
+        return list(entries)
+    declined_pairs = declined_pairs or set()
+    n = len(entries)
+    tokens = [set(_strip_article(_name_key(e.name)).split()) for e in entries]
+    # Every surface (name + aliases) of each entity, as token sets, for the superset scan.
+    surfaces = [_surface_keys(e) for e in entries]
+    surface_toks = [[set(k.split()) for k in s] for s in surfaces]
+    # fold_target[i] = j: fragment i folds into its unique containing entity j.
+    fold_target = {}
+    for i, e in enumerate(entries):
+        if not tokens[i]:                               # all-punctuation name -> never a fragment
+            continue
+        if len(e.name.strip()) <= SHORT_NAME_LEN:       # never fuzzy-fold initials ("CJ")
+            continue
+        supers = [j for j in range(n)
+                  if j != i and any(tokens[i] < ts for ts in surface_toks[j])]  # PROPER subset
+        if len(supers) != 1:                            # none, or ambiguous -> skip
+            continue
+        j = supers[0]
+        key_i = _strip_article(_name_key(e.name))
+        key_j = _strip_article(_name_key(entries[j].name))
+        aliased = key_i in surfaces[j] or key_j in surfaces[i]
+        if not (aliased or _share_quote(e, entries[j])):
+            continue                                    # token shape alone is not identity
+        if any(frozenset((a, b)) in declined_pairs
+               for a in surfaces[i] for b in surfaces[j] if a != b):
+            logger.info("Reconciler[%s]: unique-subset fold %r -> %r skipped -- the LLM "
+                        "declined this pair.", label, e.name, entries[j].name)
+            continue
+        fold_target[i] = j
+    if not fold_target:
+        return list(entries)
+    # The uniqueness gate makes fold-chains impossible (A<B<C would give A two supersets
+    # -> A skipped), so targets and fragments are disjoint. Defensively drop any edge from
+    # an index that is itself a target, so a stray chain can never build a bad group.
+    targets = set(fold_target.values())
+    fold_target = {i: t for i, t in fold_target.items() if i not in targets}
+    targets = set(fold_target.values())
+    frags = {t: [] for t in targets}
+    for i in sorted(fold_target):                       # ascending -> stable fragment order
+        frags[fold_target[i]].append(i)
+    consumed = set(fold_target)
+    out = []
+    for i, e in enumerate(entries):
+        if i in consumed:
+            continue                                    # folded into its target below
+        if i in targets:
+            members = [entries[i]] + [entries[f] for f in frags[i]]
+            try:
+                merged = _combine_group(members, entries[i].name)
+            except _VetoMerge as veto:
+                logger.warning("%s Reconciler[%s]: unique-subset fold of %s vetoed -- %s; "
+                               "kept separate.", REVIEW_PREFIX, label,
+                               [m.name for m in members], veto.message)
+                out.extend(members)
+                continue
+            for f in frags[i]:
+                logger.warning("%s Reconciler[%s]: unique-subset fold %r -> %r.",
+                               REVIEW_PREFIX, label, entries[f].name, entries[i].name)
+            out.append(merged)
+        else:
+            out.append(e)
     return out
 
 
@@ -968,12 +1111,15 @@ def _validate_decision(decision, entries):
             else:
                 seen.add(idx)
                 valid.append(idx)
-        # canonical must appear among the (valid) members' names/aliases
+        # canonical must appear among the (valid) members' names/aliases. Fold via
+        # _name_key (the deterministic floors' fold) so a straight-vs-curly quote variant
+        # of a real member name isn't rejected as "invented" -- the CJ bug, where Opus
+        # emitted a straight-quote canonical for a curly-quote member and burned 3 retries.
         allowed = set()
         for idx in valid:
-            allowed.add(entries[idx].name.strip().lower())
-            allowed.update(a.text.strip().lower() for a in entries[idx].aliases)
-        if valid and group.canonical.strip().lower() not in allowed:
+            allowed.add(_name_key(entries[idx].name))
+            allowed.update(_name_key(a.text) for a in entries[idx].aliases)
+        if valid and _name_key(group.canonical) not in allowed:
             problems.append(
                 f"merge {gi}: canonical {group.canonical!r} is not a name/alias of any member"
             )
@@ -1009,9 +1155,9 @@ def _valid_merge_subset(decision, entries, label):
         else:
             allowed = set()
             for idx in members:
-                allowed.add(entries[idx].name.strip().lower())
-                allowed.update(a.text.strip().lower() for a in entries[idx].aliases)
-            if group.canonical.strip().lower() not in allowed:
+                allowed.add(_name_key(entries[idx].name))
+                allowed.update(_name_key(a.text) for a in entries[idx].aliases)
+            if _name_key(group.canonical) not in allowed:
                 problems.append(f"canonical {group.canonical!r} is not a member name/alias")
         if problems:
             logger.warning(
@@ -1762,10 +1908,15 @@ class Reconciler(BaseAgent):
         # Deterministic floors over the LLM's result: (1) force-merge any same-name
         # entries the model silently left separate (a no-op when it merged everything),
         # (2) force-merge pure-article variants ("The Citadel"/"Citadel") the model left
-        # split, then (3) force-merge the Character entries the user DECLARED as one
-        # character in the player_map. All run on the merged output, so no index conflict.
+        # split, (3) collapse a name-fragment into its UNIQUE containing entity
+        # ("Mundi" -> "Lake Mundi") when an alias or shared quote corroborates it and the
+        # model didn't decline the pair, then (4)
+        # force-merge the Character entries the user DECLARED as one character in the
+        # player_map. All run on the merged output, so no index conflict.
         merged = _merge_identical_names(self._apply(decision, entries, label), label)
         merged = _merge_article_variants(merged, label)
+        merged = _merge_unique_subset_names(
+            merged, label, declined_pairs=_declined_name_pairs(entries, decision))
         # Names the LLM parked as possible-but-NOT-merged duplicates (indices into the
         # ORIGINAL entries; a name survives the merges as either a name or an alias). The
         # declared floor's fuzzy folds (typo/token) skip these so a deterministic merge
