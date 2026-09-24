@@ -1,0 +1,149 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://wikitizer.local/schemas/fc-result.schema.json",
+  "title": "FC Eval Result",
+  "description": "One formatting-checklist (FC) grading result for a single Wiki Output File (WOF). This is the FC instance of a shared eval envelope: the rubric eval reuses the same envelope with eval=\"rubric\" and every item engine=\"model\"; the GBF eval reuses the $defs below but swaps the item status vocabulary (agree/contradict/omit). Emitted files are plain JSON with no comments. Implement the writer as Pydantic v2 models that mirror this schema.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["eval", "schema_version", "wof", "graded_at", "graders", "summary", "items"],
+  "properties": {
+    "eval": {
+      "const": "fc",
+      "description": "Which eval produced this file. Const \"fc\" here so the FC schema validates strictly; rubric/gbf are sibling schemas that reuse the $defs below."
+    },
+    "schema_version": {
+      "type": "string",
+      "pattern": "^\\d+\\.\\d+$",
+      "description": "Version of THIS envelope shape (not the criteria). Bump only when the envelope structure changes; editing a criterion's text does not bump it.",
+      "examples": ["1.0"]
+    },
+    "wof": {
+      "type": "string",
+      "description": "Filename or path of the graded Wiki Output File. This is the join key that ties the fc/rubric/gbf results for one run together.",
+      "examples": ["wiki-2026-09-23T14-30-00.md"]
+    },
+    "graded_at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "UTC timestamp when this result was produced."
+    },
+    "graders": {
+      "type": "array",
+      "minItems": 1,
+      "description": "Who/what produced the results. FC has two entries: the mechanical linter and the model adjudicator. Rubric/GBF have a single model grader.",
+      "items": { "$ref": "#/$defs/grader" }
+    },
+    "summary": { "$ref": "#/$defs/summary" },
+    "items": {
+      "type": "array",
+      "minItems": 1,
+      "description": "One entry per criterion evaluated. Keyed by stable id; the full FC id set lives in patterns-checklist.md.",
+      "items": { "$ref": "#/$defs/item" }
+    }
+  },
+  "$defs": {
+    "engine": {
+      "type": "string",
+      "enum": ["mechanical", "model"],
+      "description": "Which engine judged this: \"mechanical\" = deterministic Python (the linter), \"model\" = the LLM adjudicator."
+    },
+    "status": {
+      "type": "string",
+      "enum": ["pass", "partial", "fail", "na", "skipped"],
+      "description": "Result for one criterion. pass/fail as expected. partial = partially met; it SCORES as a fail but is kept visible for the review. na = criterion does not apply to this WOF (e.g. the optional title checks when the WOF has no top-level # title); excluded from the denominator. skipped = not evaluated this run (e.g. the model pass was disabled, or no API key); excluded from the denominator AND flips summary.complete to false, so a partial run is never mistaken for a full one."
+    },
+    "evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["lines", "detail"],
+      "description": "Why the status was assigned. Required on every item, including passes (kept terse for mechanical passes).",
+      "properties": {
+        "lines": {
+          "type": "array",
+          "items": { "type": "integer", "minimum": 1 },
+          "description": "Line number(s) in the WOF the finding refers to. Empty for whole-document checks (e.g. a global uniqueness check)."
+        },
+        "detail": {
+          "type": "string",
+          "description": "Terse finding for mechanical checks (a count or the offending value); a one-line rationale for model checks."
+        },
+        "expected": {
+          "type": "string",
+          "description": "Optional. For mechanical comparisons: what was expected."
+        },
+        "found": {
+          "type": "string",
+          "description": "Optional. For mechanical comparisons: what was actually present."
+        }
+      }
+    },
+    "item": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "engine", "status", "evidence"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^fc\\.[a-z0-9-]+(\\.[a-z0-9-]+)*$",
+          "description": "Stable criterion id (dotted slug, e.g. fc.anchors.unique-ids). This is the ONLY join key; results reference the id, never the prose. The authoritative id->text map is patterns-checklist.md.",
+          "examples": ["fc.links.resolve", "fc.entries.grouping-no-anchor"]
+        },
+        "description": {
+          "type": "string",
+          "description": "Informational copy of the criterion text so the JSON reads without cross-referencing the checklist. NOT authoritative and may drift; the id wins. Safe to omit."
+        },
+        "engine": { "$ref": "#/$defs/engine" },
+        "status": { "$ref": "#/$defs/status" },
+        "evidence": { "$ref": "#/$defs/evidence" }
+      }
+    },
+    "summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["pass", "partial", "fail", "na", "skipped", "applicable", "score", "score_display", "complete"],
+      "description": "Tally over items[]. items[] is the source of truth; a consumer should be able to recompute this and flag a mismatch.",
+      "properties": {
+        "pass": { "type": "integer", "minimum": 0 },
+        "partial": { "type": "integer", "minimum": 0, "description": "Counts toward fail in scoring; surfaced separately for the review." },
+        "fail": { "type": "integer", "minimum": 0 },
+        "na": { "type": "integer", "minimum": 0, "description": "Excluded from the denominator." },
+        "skipped": { "type": "integer", "minimum": 0, "description": "Excluded from the denominator; any value > 0 forces complete=false." },
+        "applicable": { "type": "integer", "minimum": 0, "description": "pass + partial + fail. The scoring denominator (na and skipped excluded)." },
+        "score": { "type": ["number", "null"], "minimum": 0, "maximum": 1, "description": "pass / applicable, in 0..1. By convention, null when applicable == 0 (document the choice)." },
+        "score_display": { "type": "string", "description": "Human-readable, applicable-based, e.g. \"22/25\".", "examples": ["22/25"] },
+        "complete": { "type": "boolean", "description": "false when skipped > 0, i.e. some criteria were not evaluated this run. Makes a provisional FC grade visibly provisional." }
+      }
+    },
+    "mechanicalGrader": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["engine", "tool", "version"],
+      "properties": {
+        "engine": { "const": "mechanical" },
+        "tool": { "type": "string", "description": "The linter entry point.", "examples": ["fc_lint.py"] },
+        "version": { "type": "string", "examples": ["0.1.0"] }
+      }
+    },
+    "modelGrader": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["engine", "name", "provider", "temperature", "thinking", "votes"],
+      "properties": {
+        "engine": { "const": "model" },
+        "name": { "type": "string", "description": "Model id as the provider names it.", "examples": ["qwen/qwen3-8b"] },
+        "provider": { "type": "string", "description": "Serving provider / route.", "examples": ["openrouter"] },
+        "endpoint": { "type": "string", "description": "Optional. Pinned provider or base_url, for reproducibility." },
+        "temperature": { "type": "number", "description": "Low, but NOT greedy for Qwen3 (its card discourages greedy decoding). ~0.6-0.7.", "examples": [0.6] },
+        "thinking": { "type": "boolean", "description": "Qwen3 thinking mode. Keep false for a clean JSON judge (no <think> block).", "examples": [false] },
+        "votes": { "type": "integer", "minimum": 1, "description": "Self-consistency runs; majority vote per item. 1 = no voting; 3-5 for stability.", "examples": [3] }
+      }
+    },
+    "grader": {
+      "oneOf": [
+        { "$ref": "#/$defs/mechanicalGrader" },
+        { "$ref": "#/$defs/modelGrader" }
+      ],
+      "description": "A mechanical grader or a model grader, discriminated on engine."
+    }
+  }
+}
