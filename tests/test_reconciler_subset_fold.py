@@ -10,11 +10,13 @@ Two deterministic, under-merge-safe reconciler changes surfaced by the v2 run lo
     `_name_key` (the same fold the deterministic floors use) for MATCHING only, still returning
     the verbatim stored string.
 
-  * **Fix 2 (Lake cluster).** A new `_merge_unique_subset_names` floor collapses a name-fragment
-    into its containing entity ("Mundi"/"The Lake" -> "Lake Mundi") when the fragment's tokens are
-    a proper subset of EXACTLY ONE same-type entity -- a structural signal Opus won't assert from
-    facts alone. Zero or >=2 supersets -> skip (the uniqueness gate blocks "Krieger"/"Emperor"/
-    "Dwarves"). Short names, HistoryEvents, and Character player_name clashes never fold.
+  * **Fix 2 (Lake cluster).** A `_merge_unique_subset_names` floor collapses a name-fragment
+    into its containing entity ("Mundi" -> "Lake Mundi") when the fragment's tokens are a proper
+    subset of EXACTLY ONE same-type entity's name or alias, AND evidence links them (the fragment
+    is already an alias of the superset, or they share a quote), AND the LLM didn't decline the
+    pair. Token shape alone never folds ("Free Islands"/"Dwarven Free Islands", "Elves"/"High
+    Elves", Organization "Krieger"/"Krieger Imperium"). Short names, HistoryEvents, and Character
+    player_name clashes never fold.
 
 Offline, no API. Mirrors the FakeClient / hand-built-decision style of the other floor tests.
 """
@@ -24,12 +26,14 @@ import json
 from agents.reconciler import (
     Reconciler,
     _combine_group,
+    _declined_name_pairs,
     _merge_unique_subset_names,
     _resolve_canonical,
     _validate_decision,
 )
-from models.lore import Alias, Character, HistoryEvent, Location, Scope
-from models.reconcile import MergeGroup, ReconcileDecision
+from models.lore import (Alias, Character, HistoryEvent, Location, Organization,
+                         PeopleAndCultures, Quote, Scope)
+from models.reconcile import MergeGroup, PossibleDuplicate, ReconcileDecision
 
 
 # --- self-contained fake client -------------------------------------------- #
@@ -60,13 +64,16 @@ class FakeClient:
         self.messages = _Messages(responses)
 
 
-def loc(name, aliases=None):
-    return Location(name=name,
-                    aliases=[Alias(text=a, source_files=["g.txt"]) for a in (aliases or [])])
+def _aliases(aliases):
+    return [Alias(text=a, source_files=["g.txt"]) for a in (aliases or [])]
 
 
-def ch(name, player=None, is_pc=False):
-    return Character(name=name, is_pc=is_pc, player_name=player)
+def loc(name, aliases=None, quotes=None):
+    return Location(name=name, aliases=_aliases(aliases), supporting_quotes=list(quotes or []))
+
+
+def ch(name, player=None, is_pc=False, aliases=None):
+    return Character(name=name, is_pc=is_pc, player_name=player, aliases=_aliases(aliases))
 
 
 def hev(name):
@@ -116,39 +123,103 @@ def test_combine_does_not_demote_real_curly_name():
     assert CURLY not in [al.text for al in merged.aliases]         # real name NOT demoted to alias
 
 
-# === Fix 2: uniqueness-gated subset floor ================================== #
-def test_folds_unique_subset_heading_and_alias():
-    out = _merge_unique_subset_names([loc("Lake Mundi"), loc("Mundi"), loc("Castle")], "Location")
+# === Fix 2: evidence-gated, uniqueness-gated subset floor ================== #
+def test_folds_unique_subset_when_fragment_is_already_an_alias():
+    # Evidence #1: the fragment's name is already one of the superset's aliases.
+    out = _merge_unique_subset_names(
+        [loc("Lake Mundi", aliases=["Mundi"]), loc("Mundi"), loc("Castle")], "Location")
     assert sorted(e.name for e in out) == ["Castle", "Lake Mundi"]  # Mundi folded, Castle untouched
     lake = next(e for e in out if e.name == "Lake Mundi")
     assert "Mundi" in [a.text for a in lake.aliases]               # fragment became an alias
 
 
-def test_does_not_fold_multi_superset():
-    # "Krieger" {krieger} is a subset of TWO Krieger entities -> uniqueness gate blocks it.
+def test_folds_unique_subset_when_they_share_a_quote():
+    # Evidence #2: the same chat line backs both entries.
+    q = Quote(text="We sailed to Lake Mundi.", speaker="Matt", source_file="g.txt")
     out = _merge_unique_subset_names(
-        [loc("Krieger"), loc("Krieger Imperium"), loc("Krieger Family")], "Location")
+        [loc("Lake Mundi", quotes=[q]), loc("Mundi", quotes=[q])], "Location")
+    assert [e.name for e in out] == ["Lake Mundi"]
+    assert "Mundi" in [a.text for a in out[0].aliases]
+
+
+def test_does_not_fold_on_token_shape_alone():
+    # No alias, no shared quote -> a unique token subset is NOT identity.
+    out = _merge_unique_subset_names([loc("Lake Mundi"), loc("Mundi"), loc("Castle")], "Location")
+    assert len(out) == 3
+
+
+def test_free_islands_not_folded():
+    out = _merge_unique_subset_names(
+        [loc("Free Islands"), loc("Dwarven Free Islands")], "Location")
+    assert sorted(e.name for e in out) == ["Dwarven Free Islands", "Free Islands"]
+
+
+def test_elves_not_folded_into_high_elves():
+    out = _merge_unique_subset_names(
+        [PeopleAndCultures(name="Elves"), PeopleAndCultures(name="High Elves")], "People")
+    assert len(out) == 2
+
+
+def test_organization_kind_trap_not_folded():
+    # The house vs the empire named after it -- the KIND trap the prompt forbids merging.
+    out = _merge_unique_subset_names(
+        [Organization(name="Krieger"), Organization(name="Krieger Imperium")], "Organization")
+    assert len(out) == 2
+
+
+def test_uniqueness_counts_aliases():
+    # "White Tower" already lives on as an alias of "Citadel" -> "Tower" has TWO containing
+    # entities, so it's ambiguous even though only one NAME contains it (and even though
+    # Black Tower carries "Tower" as an alias).
+    out = _merge_unique_subset_names(
+        [loc("Citadel", aliases=["White Tower"]), loc("Black Tower", aliases=["Tower"]),
+         loc("Tower")], "Location")
+    assert len(out) == 3
+
+
+def test_superset_via_alias_can_be_the_target():
+    # A fragment contained only by the superset's ALIAS still finds that entity.
+    out = _merge_unique_subset_names(
+        [loc("The Citadel", aliases=["White Tower", "Tower"]), loc("Tower")], "Location")
+    assert [e.name for e in out] == ["The Citadel"]
+
+
+def test_does_not_fold_pair_the_llm_declined():
+    # Evidence present, but the LLM was shown the pair and kept them apart -> respected.
+    out = _merge_unique_subset_names(
+        [loc("Lake Mundi", aliases=["Mundi"]), loc("Mundi")], "Location",
+        declined_pairs={frozenset(("mundi", "lake mundi"))})
+    assert len(out) == 2
+
+
+def test_does_not_fold_multi_superset():
+    # "Krieger" {krieger} is a subset of TWO Krieger entities -> uniqueness gate blocks it,
+    # even with alias evidence on one of them.
+    out = _merge_unique_subset_names(
+        [loc("Krieger"), loc("Krieger Imperium", aliases=["Krieger"]), loc("Krieger Family")],
+        "Location")
     assert len(out) == 3
 
 
 def test_does_not_fold_short_name():
     # "Sam" is a unique subset of "Sam Wakestrider", but len <= SHORT_NAME_LEN -> never fold.
-    out = _merge_unique_subset_names([loc("Sam"), loc("Sam Wakestrider")], "Location")
+    out = _merge_unique_subset_names(
+        [loc("Sam"), loc("Sam Wakestrider", aliases=["Sam"])], "Location")
     assert len(out) == 2
 
 
 def test_does_not_fold_across_player_clash():
-    # "Aerin" c "Aerin Wakestrider" uniquely, but two different players -> _combine_group vetoes.
+    # "Aerin" c "Aerin Wakestrider" with alias evidence, but two different players -> veto.
     a = ch("Aerin", player="Alice", is_pc=True)
-    b = ch("Aerin Wakestrider", player="Bob", is_pc=True)
+    b = ch("Aerin Wakestrider", player="Bob", is_pc=True, aliases=["Aerin"])
     out = _merge_unique_subset_names([a, b], "Character")
     assert len(out) == 2
 
 
 def test_folds_character_subset_without_player_clash():
-    # Same fragment/superset shape, no clashing player -> it folds; the fuller name wins the head.
-    a = ch("Ferridus", is_pc=False, player=None)
-    b = ch("Emperor Ferridus Krieger", is_pc=False, player=None)
+    # Fragment/superset shape + alias evidence, no clashing player -> folds; fuller name heads.
+    a = ch("Ferridus")
+    b = ch("Emperor Ferridus Krieger", aliases=["Ferridus"])
     out = _merge_unique_subset_names([a, b], "Character")
     assert len(out) == 1
     assert out[0].name == "Emperor Ferridus Krieger"
@@ -166,11 +237,34 @@ def test_zero_superset_left_alone():
     assert sorted(e.name for e in out) == ["Gol", "Riverton"]
 
 
-def test_reconcile_e2e_collapses_fragment_the_llm_declined():
-    # The LLM returns an EMPTY decision (Opus declined to assert "Mundi" == "Lake Mundi");
-    # the floor still collapses it end-to-end through reconcile().
+def test_declined_pairs_from_candidates_and_possible_duplicates():
+    entries = [loc("Lake Mundi"), loc("Mundi"), loc("Castle"), loc("Castel")]
+    d = ReconcileDecision(merges=[], possible_duplicates=[
+        PossibleDuplicate(members=[2, 3], note="maybe")])
+    pairs = _declined_name_pairs(entries, d)
+    assert frozenset(("lake mundi", "mundi")) in pairs   # shown as a candidate, not merged
+    assert frozenset(("castle", "castel")) in pairs      # parked as a possible duplicate
+
+
+def test_declined_pairs_excludes_pairs_the_llm_merged():
+    entries = [loc("Lake Mundi"), loc("Mundi")]
+    d = ReconcileDecision(merges=[MergeGroup(members=[0, 1], canonical="Lake Mundi")])
+    assert _declined_name_pairs(entries, d) == set()
+
+
+def test_reconcile_e2e_respects_fragment_the_llm_declined():
+    # The pair is surfaced to the LLM as a candidate and it returns an EMPTY decision
+    # (keep separate). Even with alias evidence the floor must not override that call.
     rec = Reconciler(client=FakeClient([NO_MERGE]))
-    out = rec.reconcile([loc("Lake Mundi"), loc("Mundi"), loc("Castle")])
-    assert sorted(e.name for e in out) == ["Castle", "Lake Mundi"]
-    lake = next(e for e in out if e.name == "Lake Mundi")
-    assert "Mundi" in [a.text for a in lake.aliases]
+    out = rec.reconcile([loc("Lake Mundi", aliases=["Mundi"]), loc("Mundi"), loc("Castle")])
+    assert sorted(e.name for e in out) == ["Castle", "Lake Mundi", "Mundi"]
+
+
+def test_reconcile_e2e_folds_unflagged_fragment_with_evidence():
+    # A fragment contained only via an ALIAS isn't surfaced by _candidate_pairs (it scans
+    # names), so the LLM never judged it; with shared-quote evidence the floor folds it.
+    q = Quote(text="The Tower loomed over us.", speaker="Matt", source_file="g.txt")
+    rec = Reconciler(client=FakeClient([NO_MERGE]))
+    out = rec.reconcile([loc("The Citadel", aliases=["White Tower"], quotes=[q]),
+                         loc("Tower", quotes=[q]), loc("Riverton")])
+    assert sorted(e.name for e in out) == ["Riverton", "The Citadel"]

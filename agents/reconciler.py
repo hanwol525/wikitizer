@@ -615,29 +615,88 @@ def _merge_article_variants(entries, label):
     return out
 
 
-def _merge_unique_subset_names(entries, label):
-    """Force-merge a fragment entry into its UNIQUE containing entity -- a structural
-    signal the LLM won't assert from facts alone ("Mundi"/"The Lake" -> "Lake Mundi"
-    when Opus declined to merge them, correctly refusing to invent that identity from
-    the facts). Fold A into B iff A's name tokens are a PROPER subset of B's tokens AND
-    B is the ONLY entity of this type A is a subset of. Zero or >=2 candidate supersets
-    -> skip A: that uniqueness gate blocks the dangerous ambiguous cases ("Krieger" is a
-    subset of many Krieger entities; "Emperor" of many emperors; "Dwarves" of many
-    subgroups). The fuller/superset name wins the heading; each fragment name becomes an
-    alias (so it still feeds the crosslink pool). Runs AFTER _merge_article_variants on
-    the post-decision result, first-seen order preserved. Skipped for HistoryEvent (event
-    names are model-generated LABELS). A short fragment (<= SHORT_NAME_LEN, e.g. initials
-    like "CJ") is never folded, and a Character player_name clash still vetoes via
-    _combine_group -> two different same-named PCs stay separate.
+def _surface_keys(entity):
+    """Article-stripped name keys of an entity's name AND every alias -- every surface
+    form it answers to. Blank keys (all-punctuation) are dropped."""
+    keys = {_strip_article(_name_key(entity.name))}
+    keys.update(_strip_article(_name_key(a.text)) for a in entity.aliases)
+    keys.discard("")
+    return keys
 
-    Every fold is [REVIEW]-logged: a unique superset is a strong signal, not proof
-    ("Free Islands" c "Dwarven Free Islands" uniquely could be region-vs-part), so a
-    bad fold must be caught on review -- and if a bad class appears the fix is to
-    tighten the token rule, never to widen it."""
+
+def _share_quote(a, b):
+    """True when two entities cite at least one identical supporting quote (the same
+    (text, speaker, source_file) triple `_dedup_quotes` keys on) -- the same chat line
+    backing both is hard evidence they describe one thing."""
+    qa = {(q.text, q.speaker, q.source_file) for q in a.supporting_quotes}
+    return any((q.text, q.speaker, q.source_file) in qa for q in b.supporting_quotes)
+
+
+def _declined_name_pairs(entries, decision):
+    """Name pairs the LLM was SHOWN as possible duplicates and did NOT merge -- the
+    advisory `_candidate_pairs` list (recomputed deterministically from the same entries,
+    so it matches what the user message carried) minus pairs that landed in one merge
+    group, plus every pair the LLM parked in `possible_duplicates`. Returned as
+    frozensets of article-stripped name keys: a name survives the merges as either a
+    name or an alias, so post-merge entities are matched by surface key, not index."""
+    group_of = {}
+    for g, mg in enumerate(decision.merges):
+        for i in mg.members:
+            group_of[i] = g
+    pairs = set()
+
+    def _add(i, j):
+        if not (0 <= i < len(entries) and 0 <= j < len(entries)):
+            return
+        ki = _strip_article(_name_key(entries[i].name))
+        kj = _strip_article(_name_key(entries[j].name))
+        if ki and kj and ki != kj:
+            pairs.add(frozenset((ki, kj)))
+
+    for i, j, _reason in _candidate_pairs(entries):
+        if group_of.get(i, -1 - i) != group_of.get(j, -1 - j):  # not merged together
+            _add(i, j)
+    for pd in decision.possible_duplicates:
+        for a in range(len(pd.members)):
+            for b in range(a + 1, len(pd.members)):
+                _add(pd.members[a], pd.members[b])
+    return pairs
+
+
+def _merge_unique_subset_names(entries, label, declined_pairs=None):
+    """Force-merge a fragment entry into its UNIQUE containing entity ("Mundi" ->
+    "Lake Mundi") -- but ONLY on corroborating evidence, never on token shape alone.
+    Fold A into B iff ALL of:
+
+      * A's name tokens are a PROPER subset of the tokens of B's name OR one of B's
+        aliases, AND B is the ONLY entity of this type whose name/aliases contain A's
+        tokens. Zero or >=2 candidate supersets -> skip A. Aliases count, so a superset
+        the LLM already merged into another page ("White Tower" now an alias of
+        "Citadel") still makes a bare "Tower" ambiguous.
+      * EVIDENCE links them: A's name is already one of B's aliases (or B's name one of
+        A's), or A and B cite an identical supporting quote. A unique token subset alone
+        is NOT identity -- "Free Islands"/"Dwarven Free Islands", "Elves"/"High Elves",
+        "Krieger"/"Krieger Imperium" (the KIND trap) all pass the token test and are
+        different things.
+      * The LLM did NOT decline the pair: a pair it was shown in the candidate advisory
+        and left unmerged, or parked in possible_duplicates (`declined_pairs`, from
+        `_declined_name_pairs`), is its considered keep-separate call and is respected.
+
+    The fuller/superset name wins the heading; each fragment name becomes an alias.
+    Runs AFTER _merge_article_variants on the post-decision result, first-seen order
+    preserved. Skipped for HistoryEvent (event names are model-generated LABELS). A
+    short fragment (<= SHORT_NAME_LEN, e.g. initials like "CJ") is never folded, and a
+    Character player_name clash still vetoes via _combine_group. Every fold is
+    [REVIEW]-logged. If a bad class appears the fix is to tighten this rule, never to
+    widen it."""
     if not entries or isinstance(entries[0], HistoryEvent):
         return list(entries)
+    declined_pairs = declined_pairs or set()
     n = len(entries)
     tokens = [set(_strip_article(_name_key(e.name)).split()) for e in entries]
+    # Every surface (name + aliases) of each entity, as token sets, for the superset scan.
+    surfaces = [_surface_keys(e) for e in entries]
+    surface_toks = [[set(k.split()) for k in s] for s in surfaces]
     # fold_target[i] = j: fragment i folds into its unique containing entity j.
     fold_target = {}
     for i, e in enumerate(entries):
@@ -645,9 +704,22 @@ def _merge_unique_subset_names(entries, label):
             continue
         if len(e.name.strip()) <= SHORT_NAME_LEN:       # never fuzzy-fold initials ("CJ")
             continue
-        supers = [j for j in range(n) if j != i and tokens[i] < tokens[j]]  # PROPER subset
-        if len(supers) == 1:                            # unique containing entity -> fold
-            fold_target[i] = supers[0]
+        supers = [j for j in range(n)
+                  if j != i and any(tokens[i] < ts for ts in surface_toks[j])]  # PROPER subset
+        if len(supers) != 1:                            # none, or ambiguous -> skip
+            continue
+        j = supers[0]
+        key_i = _strip_article(_name_key(e.name))
+        key_j = _strip_article(_name_key(entries[j].name))
+        aliased = key_i in surfaces[j] or key_j in surfaces[i]
+        if not (aliased or _share_quote(e, entries[j])):
+            continue                                    # token shape alone is not identity
+        if any(frozenset((a, b)) in declined_pairs
+               for a in surfaces[i] for b in surfaces[j] if a != b):
+            logger.info("Reconciler[%s]: unique-subset fold %r -> %r skipped -- the LLM "
+                        "declined this pair.", label, e.name, entries[j].name)
+            continue
+        fold_target[i] = j
     if not fold_target:
         return list(entries)
     # The uniqueness gate makes fold-chains impossible (A<B<C would give A two supersets
@@ -1837,12 +1909,14 @@ class Reconciler(BaseAgent):
         # entries the model silently left separate (a no-op when it merged everything),
         # (2) force-merge pure-article variants ("The Citadel"/"Citadel") the model left
         # split, (3) collapse a name-fragment into its UNIQUE containing entity
-        # ("Mundi"/"The Lake" -> "Lake Mundi") the model declined to assert, then (4)
+        # ("Mundi" -> "Lake Mundi") when an alias or shared quote corroborates it and the
+        # model didn't decline the pair, then (4)
         # force-merge the Character entries the user DECLARED as one character in the
         # player_map. All run on the merged output, so no index conflict.
         merged = _merge_identical_names(self._apply(decision, entries, label), label)
         merged = _merge_article_variants(merged, label)
-        merged = _merge_unique_subset_names(merged, label)
+        merged = _merge_unique_subset_names(
+            merged, label, declined_pairs=_declined_name_pairs(entries, decision))
         # Names the LLM parked as possible-but-NOT-merged duplicates (indices into the
         # ORIGINAL entries; a name survives the merges as either a name or an alias). The
         # declared floor's fuzzy folds (typo/token) skip these so a deterministic merge
