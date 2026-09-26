@@ -15,9 +15,10 @@ import os
 import sys
 from typing import Optional
 
-from evals.fc import DEFAULT_VOTES, ENV_VOTES
+from evals.common import DEFAULT_VOTES
+from evals.common.model_client import build_model_client
+from evals.fc import ENV_VOTES
 from evals.fc.emit import result_to_json, write_result
-from evals.fc.model_client import build_model_client
 from evals.fc.runner import grade_file
 
 logger = logging.getLogger("evals.fc")

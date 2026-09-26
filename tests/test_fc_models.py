@@ -1,13 +1,12 @@
-"""Tests for evals/fc/models.py -- the Pydantic v2 models mirroring fc-result.schema.json.
+"""Tests for evals/fc/models.py -- the FC-specific FCResult + the Summary `pass` alias.
 
-Fully offline. Covers the two subtle shapes: FIX #1 (the `pass` keyword -> `n_pass` alias)
-and FIX #7 (`Literal` consts + the discriminated `Grader` union).
+Fully offline. Covers FIX #1 (the `pass` keyword -> `n_pass` alias), the `eval="fc"` /
+schema_version consts, the full FCResult round-trip, and graded_at ISO serialization. The
+shared envelope pieces (extra=forbid, enum serialization, the discriminated Grader union)
+are tested in tests/test_common_models.py.
 """
 
 from datetime import datetime, timezone
-
-import pytest
-from pydantic import ValidationError
 
 from evals.fc.models import (
     Engine,
@@ -15,7 +14,6 @@ from evals.fc.models import (
     FCItem,
     FCResult,
     MechanicalGrader,
-    ModelGrader,
     Status,
     Summary,
 )
@@ -56,7 +54,7 @@ def test_summary_json_key_is_pass_not_n_pass():
     assert d["pass"] == 22 and "n_pass" not in d
 
 
-# --- FIX #7: Literal consts + discriminated union --------------------------- #
+# --- eval/schema consts + round-trip + serialization ------------------------ #
 
 def test_eval_and_engine_consts():
     r = _result()
@@ -64,40 +62,11 @@ def test_eval_and_engine_consts():
     assert r.graders[0].engine == "mechanical"
 
 
-def test_grader_discriminated_union_parses_both():
-    payload = _result(graders=[
-        MechanicalGrader(tool="fc_lint.py", version="0.1.0"),
-        ModelGrader(name="qwen/qwen3-8b", provider="openrouter", temperature=0.6,
-                    thinking=False, votes=3),
-    ]).model_dump(mode="json", by_alias=True)
-    round_tripped = FCResult.model_validate(payload)
-    assert isinstance(round_tripped.graders[0], MechanicalGrader)
-    assert isinstance(round_tripped.graders[1], ModelGrader)
-    assert round_tripped.graders[1].name == "qwen/qwen3-8b"
-
-
-# --- extra=forbid + round-trip + serialization ------------------------------ #
-
-def test_extra_forbidden_on_every_model():
-    with pytest.raises(ValidationError):
-        Evidence(detail="x", bogus=1)
-    with pytest.raises(ValidationError):
-        FCItem(id="x", engine=Engine.MODEL, status=Status.PASS,
-               evidence=Evidence(detail="d"), bogus=1)
-
-
 def test_full_round_trip_is_stable():
     r = _result()
     d = r.model_dump(mode="json", by_alias=True)
     again = FCResult.model_validate(d)
     assert again.model_dump(mode="json", by_alias=True) == d
-
-
-def test_status_and_engine_serialize_as_strings():
-    it = FCItem(id="fc.x", engine=Engine.MODEL, status=Status.SKIPPED,
-                evidence=Evidence(detail="d"))
-    d = it.model_dump(mode="json")
-    assert d["engine"] == "model" and d["status"] == "skipped"
 
 
 def test_graded_at_serializes_iso():

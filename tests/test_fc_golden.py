@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 
 from evals.fc.fc_lint import MECHANICAL_IDS, run_lint
-from evals.fc.parse import parse_wof
+from evals.common.parse import parse_wof
 from evals.fc.runner import grade
 
 _GOLDEN = Path(__file__).resolve().parent.parent / "output" / "gol-lore-full.md"

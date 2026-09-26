@@ -19,14 +19,16 @@ never sees the whole file.
 import re
 from typing import List
 
-from evals.fc.models import Engine, Evidence, FCItem, Status
-from evals.fc.parse import ParsedWOF
-from evals.fc.slugify import (
+from evals.common.models import Engine, Evidence, Status
+from evals.common.parse import ParsedWOF
+from evals.common.slugify import (
     anchor_matches_name,
     has_non_ascii_letter,
     slugify,
     strip_leading_article,
 )
+
+from evals.fc.models import FCItem
 
 # --- criterion id -> short prose (informational `description`; ids are the join key) --- #
 

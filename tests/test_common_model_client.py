@@ -1,4 +1,4 @@
-"""Tests for evals/fc/model_client.py -- the thin OpenAI-compat adapter. Offline.
+"""Tests for evals/common/model_client.py -- the thin OpenAI-compat adapter. Offline.
 
 The client construction is network-free (openai.OpenAI is lazy), so we can build a real one
 and swap its inner `_client` for a fake to exercise the FIX #6 response_format fallback
@@ -8,7 +8,7 @@ without any network. build_model_client's env logic is tested directly.
 import httpx
 import pytest
 
-from evals.fc.model_client import (
+from evals.common.model_client import (
     OpenAICompatModelClient,
     build_model_client,
     strip_think,
