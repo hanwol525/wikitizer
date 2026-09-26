@@ -7,7 +7,7 @@ FIX #4 (figure_candidates excludes refs/anchor/link/slug digits).
 """
 
 from evals.fc import fc_lint as L
-from evals.fc.parse import parse_wof
+from evals.common.parse import parse_wof
 
 GOOD = """\
 # Title

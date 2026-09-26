@@ -12,7 +12,7 @@ import pytest
 from evals.fc import fc_lint as L
 from evals.fc.emit import build_result, result_to_json, write_result
 from evals.fc.models import Engine, Evidence, FCItem, FCResult, Status
-from evals.fc.parse import parse_wof
+from evals.common.parse import parse_wof
 from evals.fc.runner import grade
 
 NOW = datetime(2026, 9, 23, 14, 32, 10, tzinfo=timezone.utc)

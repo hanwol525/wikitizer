@@ -13,9 +13,10 @@ from datetime import datetime
 from pathlib import Path
 from typing import List, Optional
 
+from evals.common.models import MechanicalGrader, ModelGrader, Status
+from evals.common.scoring import build_summary
 from evals.fc import FC_LINT_TOOL, FC_LINT_VERSION
-from evals.fc.models import FCItem, FCResult, MechanicalGrader, ModelGrader, Status
-from evals.fc.scoring import build_summary
+from evals.fc.models import FCItem, FCResult
 
 
 def build_result(wof: str, items: List[FCItem], now: datetime,

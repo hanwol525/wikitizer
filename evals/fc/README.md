@@ -17,9 +17,11 @@ The JSON prints to stdout (and to `--out` when given); progress + `[REVIEW]` log
 ## The "LLM-decides / Python-assembles" split
 
 - **24 mechanical checks** (`fc_lint.py`) run in pure Python — deterministic structural
-  linting. Python owns parsing (`parse.py`), scoring (`scoring.py`), and the output contract
-  (`models.py` / `emit.py`).
-- **3 model checks** run through a small LLM adjudicator (`adjudicator.py`) on a *tiny
+  linting. Python owns parsing (`evals/common/parse.py`), scoring (`evals/common/scoring.py`),
+  and the output contract (the shared envelope models in `evals/common/models.py`; FC's
+  `FCResult` + `emit.py` here).
+- **3 model checks** run through a small LLM adjudicator (`adjudicator.py`, over the shared
+  voting engine `BaseAdjudicator` in `evals/common/adjudicator.py`) on a *tiny
   pre-extracted candidate set* (the model never sees the whole file): `fc.entries.grouping-no-anchor`
   (group label vs an entry that lost its anchor), `fc.list-entries.approx-tilde` (an
   approximate figure that should carry `~`), `fc.markers.tbd` (an unmarked stub).
@@ -30,8 +32,9 @@ the linter hardcodes the ids and never reads the checklist at runtime.
 
 ## The result contract
 
-`fc-result.schema.json` + the Pydantic v2 models in `models.py` are the source of truth (a
-mismatch fails at emit time). Status is a **5-value** enum — `pass` / `partial` / `fail` /
+`fc-result.schema.json` + the shared Pydantic v2 envelope models in `evals/common/models.py`
+(assembled by FC's `FCResult` in `models.py`, which keeps `FCItem = Item` as a thin alias) are
+the source of truth (a mismatch fails at emit time). Status is a **5-value** enum — `pass` / `partial` / `fail` /
 `na` / `skipped`:
 
 - **applicable-only denominator:** `applicable = pass + partial + fail` (`na` and `skipped`
@@ -80,8 +83,9 @@ rubric wants them.
 
 ## Tests
 
-Committed in the top-level `tests/` (`tests/test_fc_*.py`), offline (a `FakeModelClient`
-feeds canned verdicts). `tests/test_fc_golden.py` runs the linter over `output/gol-lore-full.md`
+Committed in the top-level `tests/`, offline (a `FakeModelClient` feeds canned verdicts):
+FC-specific tests are `tests/test_fc_*.py`; the shared-infrastructure tests (parse, slugify,
+scoring, envelope models, model client, voting engine) are `tests/test_common_*.py`. `tests/test_fc_golden.py` runs the linter over `output/gol-lore-full.md`
 (gitignored PII — the test `skipif`s when it's absent) and asserts all 24 mechanical checks
 are `pass`/`na` — the acceptance bar. `tests/test_fc_integration.py` (`@pytest.mark.integration`,
 `skipif LLM_OPENAI_API_KEY` absent) hits the real judge.

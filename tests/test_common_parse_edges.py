@@ -1,9 +1,9 @@
-"""Deeper coverage of evals/fc/parse.py internals: title-detection variants, subtitle
+"""Deeper coverage of evals/common/parse.py internals: title-detection variants, subtitle
 edges, anchor-context classification, section body slicing, bullet-name fallbacks, and
 fenced-code handling. Offline, fabricated WOFs.
 """
 
-from evals.fc.parse import parse_wof
+from evals.common.parse import parse_wof
 
 
 def test_title_with_hr_but_no_subtitle():

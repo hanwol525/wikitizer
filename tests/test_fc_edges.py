@@ -8,7 +8,7 @@ import json
 from evals.fc import fc_lint as L
 from evals.fc.adjudicator import Adjudicator
 from evals.fc.models import Status
-from evals.fc.parse import parse_wof
+from evals.common.parse import parse_wof
 
 
 def st(text, fn):
