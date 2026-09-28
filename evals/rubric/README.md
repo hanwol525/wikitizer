@@ -27,7 +27,9 @@ model never sees raw markdown. Python does the narrowing:
   vote resolves toward the strict label + `[REVIEW]`).
 - The model returns **indices** (which WOF section / which entry) and booleans; Python resolves
   the indices back to objects and assembles the items — a fuzzy name the model returns never has
-  to be re-parsed.
+  to be re-parsed. Only a real JSON `true` counts as a positive vote (a string `"false"`/`"no"`
+  fails closed), and a `present: true` whose `match` isn't a valid index FAILs with `[REVIEW]`
+  rather than passing with nothing mapped.
 
 **Per-entity items** (not per-criterion): a category is batched into one call and the model
 returns a verdict per required entity. Player characters get **two** items each (`pc-stated` +

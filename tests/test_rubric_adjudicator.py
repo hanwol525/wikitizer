@@ -190,13 +190,79 @@ def test_judge_pcs_all_malformed_fail_closed():
 
 
 def test_match_bool_is_not_treated_as_index():
-    # the bool/int trap: a JSON bool for "match" must NOT be accepted as index 1.
+    # the bool/int trap: a JSON bool for "match" must NOT be accepted as index 1 -- and a
+    # "present" with no valid match fails closed rather than passing with nothing mapped.
     fake = FakeModelClient([R({"present": True, "match": True})])
     items, smap = RubricAdjudicator(fake, votes=1).judge_sections([E("A")], ["A"])
-    assert items[0].status == Status.PASS                       # present
-    assert smap == [None]                                       # but match=True is not a valid index
+    assert items[0].status == Status.FAIL and "[REVIEW]" in items[0].evidence.detail
+    assert smap == [None]
 
     entries = _entries("Locations")
     fake2 = FakeModelClient([R({"present": True, "match": True})])
-    _, emap = RubricAdjudicator(fake2, votes=1).judge_presence("locations", [E("Alpha")], entries)
-    assert emap == [None]                                       # bool match -> no entry mapped
+    items2, emap = RubricAdjudicator(fake2, votes=1).judge_presence("locations", [E("Alpha")], entries)
+    assert items2[0].status == Status.FAIL and "[REVIEW]" in items2[0].evidence.detail
+    assert emap == [None]
+
+
+def test_present_with_out_of_range_or_null_match_fails_closed():
+    fake = FakeModelClient([R({"present": True, "match": 99}, {"present": True, "match": None})])
+    items, smap = RubricAdjudicator(fake, votes=1).judge_sections([E("A"), E("B")], ["A", "B"])
+    assert [it.status for it in items] == [Status.FAIL, Status.FAIL]
+    assert all("[REVIEW]" in it.evidence.detail for it in items)
+    assert smap == [None, None]
+
+    entries = _entries("Locations")
+    fake2 = FakeModelClient([R({"present": True, "match": 0}, {"present": True, "match": 3})])
+    items2, emap = RubricAdjudicator(fake2, votes=1).judge_presence(
+        "locations", [E("Alpha"), E("Beta")], entries)
+    assert [it.status for it in items2] == [Status.FAIL, Status.FAIL]
+    assert emap == [None, None]
+
+
+def test_valid_match_taken_from_a_later_present_vote():
+    # the first "present" vote's match is bad, but another present vote gives a valid one.
+    fake = FakeModelClient([
+        R({"present": True, "match": 99}),
+        R({"present": True, "match": 2}),
+        R({"present": False, "match": None}),
+    ])
+    items, smap = RubricAdjudicator(fake, votes=3).judge_sections([E("B")], ["A", "B"])
+    assert items[0].status == Status.PASS and smap == [2]
+
+
+def test_string_booleans_fail_closed():
+    # bool("false") is True -- a stringly "false"/"no"/"true" must never count as a positive vote.
+    fake = FakeModelClient([R({"present": "false", "match": 1}, {"present": "true", "match": 2})])
+    items, smap = RubricAdjudicator(fake, votes=1).judge_sections([E("A"), E("B")], ["A", "B"])
+    assert [it.status for it in items] == [Status.FAIL, Status.FAIL]
+    assert smap == [None, None]
+
+    entries = _entries("Locations")
+    fake2 = FakeModelClient([R({"present": "false", "match": 1})])
+    items2, emap = RubricAdjudicator(fake2, votes=1).judge_presence("locations", [E("Alpha")], entries)
+    assert items2[0].status == Status.FAIL and emap == [None]
+
+    aerin_entry = _entries("Characters")[0]
+    fake3 = FakeModelClient([R({"pc_stated": "no", "asterisk": 1})])
+    by_id = {it.id: it for it in RubricAdjudicator(fake3, votes=1).judge_pcs([(E("Aerin"), aerin_entry)])}
+    assert by_id["rubric.pc-stated.aerin"].status == Status.FAIL
+    assert by_id["rubric.pc-marked.aerin"].status == Status.FAIL
+
+    alpha = entries[0]
+    fake4 = FakeModelClient([R({"supported": "no", "span": "Alpha the fortress"})])
+    item = RubricAdjudicator(fake4, votes=1).judge_support(
+        E("Alpha"), "locations", alpha, [(1, "Alpha the fortress")])
+    assert item.status == Status.FAIL
+
+
+def test_support_span_companion_ignores_stringly_true_vote():
+    # the span must come from a vote that REALLY said supported: true, not a "false" string.
+    alpha = _entries("Locations")[0]
+    fake = FakeModelClient([
+        R({"supported": "false", "span": "wrong span"}),
+        R({"supported": True, "span": "Alpha the fortress"}),
+        R({"supported": True, "span": "Alpha the fortress"}),
+    ])
+    item = RubricAdjudicator(fake, votes=3).judge_support(
+        E("Alpha"), "locations", alpha, [(1, "Alpha the fortress")])
+    assert item.status == Status.PASS and item.evidence.found == "Alpha the fortress"

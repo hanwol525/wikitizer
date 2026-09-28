@@ -106,8 +106,10 @@ class RubricAdjudicator(BaseAdjudicator):
     @staticmethod
     def _fold_bool(votes: List[List[dict]], i: int, field: str) -> Tuple[bool, bool]:
         """(majority, split) for ``results[*][i][field]`` read as bool. A tie resolves to
-        ``False`` (the strict/bad direction). ``split`` flags a non-unanimous decision."""
-        decisions = [bool(v[i].get(field)) for v in votes]
+        ``False`` (the strict/bad direction). ``split`` flags a non-unanimous decision. Only a
+        real JSON ``true`` counts as positive -- ``bool("false")`` is ``True``, so a stringly
+        ``"false"``/``"no"`` must not be read with ``bool()``; anything non-``True`` fails closed."""
+        decisions = [v[i].get(field) is True for v in votes]
         trues = sum(decisions)
         total = len(decisions)
         majority = trues * 2 > total
@@ -119,8 +121,19 @@ class RubricAdjudicator(BaseAdjudicator):
         """The companion value (``match`` index / ``span`` text) from the first vote whose
         decision matches the resolved majority."""
         for v in votes:
-            if bool(v[i].get(field)) == majority:
+            if (v[i].get(field) is True) == majority:
                 return v[i].get(companion)
+        return None
+
+    @staticmethod
+    def _valid_match(votes: List[List[dict]], i: int, upper: int) -> Optional[int]:
+        """The first valid 1-based ``match`` index (``type is int`` -- a bool is not an index --
+        and within ``1..upper``) among the votes that said ``present: true``, else ``None``."""
+        for v in votes:
+            if v[i].get("present") is True:
+                match = v[i].get("match")
+                if type(match) is int and 1 <= match <= upper:
+                    return match
         return None
 
     # --- the checks --------------------------------------------------------- #
@@ -152,10 +165,18 @@ class RubricAdjudicator(BaseAdjudicator):
             if split:
                 logger.warning("[REVIEW] rubric section %r: split vote", required[j].name)
             if present:
-                match = self._companion(votes, j, "present", "match", True)
-                wof_idx = match if type(match) is int and 1 <= match <= len(wof_titles) else None
+                wof_idx = self._valid_match(votes, j, len(wof_titles))
                 section_map.append(wof_idx)
-                detail = "section present" + (f" (WOF section #{wof_idx})" if wof_idx else "") + note
+                if wof_idx is None:
+                    # "present" but pointing at no real section: a PASS here would contradict
+                    # the per-category presence items (which would read the section as absent).
+                    logger.warning("[REVIEW] rubric section %r: voted present with no valid match; failing closed",
+                                   required[j].name)
+                    items.append(self._item(ids[j], descs[j], Status.FAIL, Evidence(
+                        lines=[], detail="[REVIEW] model said present but gave no valid section match; "
+                                         "failing closed" + note)))
+                    continue
+                detail = f"section present (WOF section #{wof_idx})" + note
                 items.append(self._item(ids[j], descs[j], Status.PASS, Evidence(lines=[], detail=detail)))
             else:
                 section_map.append(None)
@@ -194,12 +215,21 @@ class RubricAdjudicator(BaseAdjudicator):
             if split:
                 logger.warning("[REVIEW] rubric presence %s %r: split vote", category_token, required[j].name)
             if present:
-                match = self._companion(votes, j, "present", "match", True)
-                entry = entries[match - 1] if type(match) is int and 1 <= match <= len(entries) else None
+                match = self._valid_match(votes, j, len(entries))
+                entry = entries[match - 1] if match is not None else None
                 emap.append(entry)
-                detail = "present" + (f" (entry: {entry.name!r})" if entry else "") + note
-                lines = [entry.lineno] if entry else []
-                items.append(self._item(ids[j], descs[j], Status.PASS, Evidence(lines=lines, detail=detail)))
+                if entry is None:
+                    # "present" but pointing at no real entry: a PASS here would leave sourcing
+                    # silently unscorable (na, "entity absent") downstream.
+                    logger.warning("[REVIEW] rubric presence %s %r: voted present with no valid match; "
+                                   "failing closed", category_token, required[j].name)
+                    items.append(self._item(ids[j], descs[j], Status.FAIL, Evidence(
+                        lines=[], detail="[REVIEW] model said present but gave no valid entry match; "
+                                         "failing closed" + note)))
+                    continue
+                detail = f"present (entry: {entry.name!r})" + note
+                items.append(self._item(ids[j], descs[j], Status.PASS,
+                                        Evidence(lines=[entry.lineno], detail=detail)))
             else:
                 emap.append(None)
                 items.append(self._item(ids[j], descs[j], Status.FAIL,
