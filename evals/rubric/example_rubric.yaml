@@ -1,0 +1,40 @@
+# Fabricated example rubric for an INVENTED campaign ("The Sundered Reaches").
+#
+# This file is COMMITTED as the schema reference for output/rubric.yaml and as the offline
+# test fixture (so a fresh clone can run the rubric tests without the gitignored real rubric).
+# The real checklist lives in output/rubric.yaml (gitignored) and is what a real grading run
+# uses; this one intentionally names nothing from any real campaign.
+#
+# Shapes shown: a bare string (-> {name: <str>}), a {name} map, {name, aliases}, and
+# {name, pc} for player characters.
+
+sections:
+  - name: Locations
+    aliases: [Places]
+  - {name: People & Cultures}
+  - Characters
+  - History
+  - Organizations
+  - Items
+
+locations:
+  - Aldenburg
+  - {name: Dwarven Stronghold, aliases: [Taken Lands of Tiber]}
+  - Mistfen Marsh
+
+characters:
+  - {name: Aerin Wakestrider, pc: true}
+  - {name: Kriggius Krieger, aliases: [Kriggy], pc: true}
+  - Old Maggie
+
+organizations:
+  - The Iron Concord
+  - {name: Wardens of the Vale, aliases: [Vale Wardens]}
+
+people_and_cultures:
+  - {name: The Krieg, aliases: [Kriegers]}
+  - Direwolves
+
+events:
+  - {name: Imperial Expansion Begins, aliases: [Start of the Imperial Expansion]}
+  - The Sundering
