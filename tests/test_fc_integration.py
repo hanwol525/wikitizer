@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from evals.fc.model_client import build_model_client
+from evals.common.model_client import build_model_client
 from evals.fc.models import Status
 from evals.fc.runner import grade_file
 

@@ -1,14 +1,14 @@
-"""The thin model-client adapter the FC adjudicator calls.
+"""The thin OpenAI-compatible model-client adapter the eval adjudicators call.
 
 It deliberately REUSES the pipeline's existing OpenAI-compatible ``.env`` path
 (``LLM_OPENAI_BASE_URL`` + ``LLM_OPENAI_API_KEY``, the OpenRouter gateway) and the already-
 pinned ``openai`` SDK -- it does NOT stand up a new endpoint or auth scheme. A dedicated
 adapter (rather than reusing ``agents.llm_client.AnthropicCompatClient``) is unavoidable
-only because the FC judge needs two things that surface can't pass per call: a
+only because the judge needs two things that surface can't pass per call: a
 ``response_format`` (forced JSON) and Qwen3's thinking-off ``extra_body``.
 
 The client is INJECTABLE -- the adjudicator takes any object with a ``complete(system,
-user) -> str`` method, so the offline tests pass a ``FakeModelClient`` and never touch the
+user) -> str`` method, so the offline tests pass a fake client and never touch the
 network or need a key (the same dependency-injection shape ``BaseAgent`` uses).
 
 Default judge: Qwen3-8B, thinking OFF, non-greedy (Qwen3 discourages greedy decoding),
@@ -16,6 +16,11 @@ Default judge: Qwen3-8B, thinking OFF, non-greedy (Qwen3 discourages greedy deco
 ``response_format`` -- if it's REJECTED (HTTP 400) we retry once without it (the tolerant
 parser upstream then handles a plain reply); if it's merely IGNORED the tolerant parser
 already covers it.
+
+``build_model_client(env, prefix="FC")`` reads ``WIKITIZER_<prefix>_MODEL`` /
+``WIKITIZER_<prefix>_TEMPERATURE`` plus the shared ``LLM_OPENAI_*`` gateway, so each eval
+gets its own overridable judge config (FC uses the default ``"FC"`` prefix; the rubric
+passes ``"RUBRIC"``).
 """
 
 import logging
@@ -23,17 +28,13 @@ import os
 import re
 from typing import Optional
 
-from evals.fc import (
-    DEFAULT_FC_MODEL,
-    DEFAULT_FC_PROVIDER,
-    DEFAULT_TEMPERATURE,
-    ENV_MODEL,
-    ENV_OPENAI_API_KEY,
-    ENV_OPENAI_BASE_URL,
-    ENV_TEMPERATURE,
-)
+from evals.common import DEFAULT_MODEL, DEFAULT_PROVIDER, DEFAULT_TEMPERATURE
 
-logger = logging.getLogger("evals.fc.model_client")
+logger = logging.getLogger("evals.common.model_client")
+
+# The shared OpenAI-compat gateway env vars (reused from the pipeline's .env path).
+ENV_OPENAI_BASE_URL = "LLM_OPENAI_BASE_URL"
+ENV_OPENAI_API_KEY = "LLM_OPENAI_API_KEY"
 
 # The extra_body that turns a reasoning model's thinking OFF -- sent BOTH the OpenRouter
 # unified param and the provider-native chat_template toggle, for the best odds one is
@@ -51,11 +52,11 @@ def strip_think(text: str) -> str:
 
 
 class OpenAICompatModelClient:
-    """An OpenAI-compatible chat client specialized for the FC judge. ``complete`` sends one
+    """An OpenAI-compatible chat client specialized for the eval judge. ``complete`` sends one
     system+user turn and returns the assistant text (think-block stripped)."""
 
     def __init__(self, model: str, temperature: float, thinking: bool = False,
-                 provider: str = DEFAULT_FC_PROVIDER, base_url: Optional[str] = None,
+                 provider: str = DEFAULT_PROVIDER, base_url: Optional[str] = None,
                  api_key: Optional[str] = None, timeout: float = 60.0):
         import openai  # lazy: an Anthropic-only user (or an offline test) never imports it
         self._openai = openai
@@ -92,22 +93,25 @@ class OpenAICompatModelClient:
         return strip_think(content)
 
 
-def build_model_client(env=None) -> Optional[OpenAICompatModelClient]:
-    """Build the FC judge client from the environment, or return None when the OpenAI-compat
+def build_model_client(env=None, prefix: str = "FC") -> Optional[OpenAICompatModelClient]:
+    """Build the eval judge client from the environment, or return None when the OpenAI-compat
     credentials aren't set (which drives the runner's SKIPPED path -- same spirit as the
     integration tests' ``skipif`` on a missing key). The model/temperature are read from
-    ``WIKITIZER_FC_MODEL`` / ``WIKITIZER_FC_TEMPERATURE`` so the judge is swappable via .env."""
+    ``WIKITIZER_<prefix>_MODEL`` / ``WIKITIZER_<prefix>_TEMPERATURE`` so the judge is swappable
+    per eval via .env (``prefix="FC"`` by default; the rubric passes ``prefix="RUBRIC"``)."""
     env = os.environ if env is None else env
     base_url = env.get(ENV_OPENAI_BASE_URL)
     api_key = env.get(ENV_OPENAI_API_KEY)
     if not base_url or not api_key:
         return None
-    model = env.get(ENV_MODEL) or DEFAULT_FC_MODEL
-    raw_temp = env.get(ENV_TEMPERATURE)
+    env_model = f"WIKITIZER_{prefix}_MODEL"
+    env_temperature = f"WIKITIZER_{prefix}_TEMPERATURE"
+    model = env.get(env_model) or DEFAULT_MODEL
+    raw_temp = env.get(env_temperature)
     try:
         temperature = float(raw_temp) if raw_temp else DEFAULT_TEMPERATURE
     except ValueError:
-        logger.warning("%s=%r is not a number; using %.2f", ENV_TEMPERATURE, raw_temp,
+        logger.warning("%s=%r is not a number; using %.2f", env_temperature, raw_temp,
                        DEFAULT_TEMPERATURE)
         temperature = DEFAULT_TEMPERATURE
     return OpenAICompatModelClient(model=model, temperature=temperature, thinking=False,

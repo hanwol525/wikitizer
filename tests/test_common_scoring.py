@@ -1,17 +1,17 @@
-"""Tests for evals/fc/scoring.py -- the applicable-only summary math. Fully offline."""
+"""Tests for evals/common/scoring.py -- the applicable-only summary math. Fully offline."""
 
-from evals.fc.models import Engine, Evidence, FCItem, Status
-from evals.fc.scoring import build_summary
+from evals.common.models import Engine, Evidence, Item, Status
+from evals.common.scoring import build_summary
 
 
 def _items(**counts):
-    """Build a list of FCItems with the given per-status counts."""
+    """Build a list of Items with the given per-status counts."""
     out = []
     n = 0
     for status_name, k in counts.items():
         status = Status(status_name)
         for _ in range(k):
-            out.append(FCItem(id=f"fc.x.{n}", engine=Engine.MECHANICAL, status=status,
+            out.append(Item(id=f"fc.x.{n}", engine=Engine.MECHANICAL, status=status,
                               evidence=Evidence(detail="d")))
             n += 1
     return out

@@ -1,6 +1,6 @@
-"""Tests for evals/fc/parse.py -- the ParsedWOF tokenizer. Fully offline, fabricated WOFs."""
+"""Tests for evals/common/parse.py -- the ParsedWOF tokenizer. Fully offline, fabricated WOFs."""
 
-from evals.fc.parse import parse_wof
+from evals.common.parse import parse_wof
 
 TITLED = """\
 # The Lore of Somewhere

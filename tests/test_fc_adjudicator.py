@@ -1,8 +1,7 @@
-"""Tests for evals/fc/adjudicator.py -- the 3 model checks + voting. Fully offline.
-
-A FakeModelClient feeds canned JSON replies (queued in order), so the voting/majority logic,
-the FIX #5 length-guard + fail-closed path, and the 0-candidate short-circuit are all exercised
-without touching the network or needing a key.
+"""Tests for evals/fc/adjudicator.py -- the 3 FC judge checks (grouping / tilde / tbd) and
+their 0-candidate NA short-circuits. Fully offline (a FakeModelClient feeds canned JSON
+replies). The shared voting engine (FIX #5 vote hygiene, fail-closed, majority) is tested in
+tests/test_common_adjudicator.py.
 """
 
 import json
@@ -87,43 +86,3 @@ def test_tbd_stub_fails_and_ok_passes():
     ok = Adjudicator(FakeModelClient([verdicts("ok")] * 3), votes=3).judge_tbd(
         [{"name": "Ned", "body": "a real backstory [TBD]", "lineno": 20}])
     assert ok.status == Status.PASS
-
-
-# --- FIX #5: vote hygiene --------------------------------------------------- #
-
-def test_wrong_length_vote_is_discarded_as_abstain():
-    # Two candidates; one vote returns the wrong count (abstain), the other two decide.
-    cands = [{"name": "A", "body": "x", "lineno": 1}, {"name": "B", "body": "y", "lineno": 2}]
-    fake = FakeModelClient([
-        verdicts("ok"),                       # wrong length (1, not 2) -> discarded
-        verdicts("ok", "ok"),
-        verdicts("ok", "ok"),
-    ])
-    item = Adjudicator(fake, votes=3).judge_tbd(cands)
-    assert item.status == Status.PASS
-
-
-def test_all_malformed_votes_fail_closed():
-    fake = FakeModelClient(["not json", "{}", verdicts("ok", "ok")])   # none valid for 1 candidate
-    item = Adjudicator(fake, votes=3).judge_tbd([{"name": "A", "body": "x", "lineno": 1}])
-    assert item.status == Status.FAIL
-    assert "[REVIEW]" in item.evidence.detail
-
-
-def test_split_vote_is_decided_by_majority_and_flagged(caplog):
-    import logging
-    caplog.set_level(logging.WARNING)
-    # 2 ok vs 1 stub -> majority ok (pass), but the split is flagged [REVIEW].
-    fake = FakeModelClient([verdicts("ok"), verdicts("stub_needs_tbd"), verdicts("ok")])
-    item = Adjudicator(fake, votes=3).judge_tbd([{"name": "A", "body": "x", "lineno": 1}])
-    assert item.status == Status.PASS
-    assert "[REVIEW]" in item.evidence.detail
-    assert any("[REVIEW]" in r.getMessage() for r in caplog.records)
-
-
-def test_unknown_labels_ignored_then_fail_closed_when_all_unknown():
-    fake = FakeModelClient([verdicts("weird"), verdicts("also_weird"), verdicts("nope")])
-    item = Adjudicator(fake, votes=3).judge_grouping(
-        [{"label": "X", "lineno": 3, "entries_beneath": []}])
-    # No recognized label for the candidate -> resolved to the bad label -> fail.
-    assert item.status == Status.FAIL

@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from evals.fc import fc_lint as L
-from evals.fc.parse import parse_wof
+from evals.common.parse import parse_wof
 
 GOOD = """\
 # Title

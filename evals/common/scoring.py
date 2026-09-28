@@ -9,10 +9,10 @@ was skipped, so a provisional run is visibly provisional.
 
 from typing import List
 
-from evals.fc.models import FCItem, Status, Summary
+from evals.common.models import Item, Status, Summary
 
 
-def build_summary(items: List[FCItem]) -> Summary:
+def build_summary(items: List[Item]) -> Summary:
     counts = {s: 0 for s in Status}
     for it in items:
         counts[it.status] += 1

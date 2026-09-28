@@ -10,7 +10,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
-from evals.fc import DEFAULT_FC_PROVIDER, DEFAULT_TEMPERATURE
+from evals.common import DEFAULT_PROVIDER, DEFAULT_TEMPERATURE
+from evals.common.models import Engine, Evidence, Status
+from evals.common.parse import parse_wof
 from evals.fc.adjudicator import Adjudicator, GROUPING_ID, TBD_ID, TILDE_ID
 from evals.fc.emit import build_result
 from evals.fc.fc_lint import (
@@ -22,8 +24,7 @@ from evals.fc.fc_lint import (
     run_lint,
     tbd_candidates,
 )
-from evals.fc.models import Engine, Evidence, FCItem, FCResult, Status
-from evals.fc.parse import parse_wof
+from evals.fc.models import FCItem, FCResult
 
 logger = logging.getLogger("evals.fc.runner")
 
@@ -54,7 +55,7 @@ def _safe_model_check(cid: str, fn) -> FCItem:
 def _model_cfg(model_client, votes: int) -> dict:
     return {
         "name": getattr(model_client, "model", "unknown"),
-        "provider": getattr(model_client, "provider", DEFAULT_FC_PROVIDER),
+        "provider": getattr(model_client, "provider", DEFAULT_PROVIDER),
         "temperature": float(getattr(model_client, "temperature", DEFAULT_TEMPERATURE)),
         "thinking": bool(getattr(model_client, "thinking", False)),
         # Record the EFFECTIVE vote count (the adjudicator clamps to >=1), not a requested 0/neg.

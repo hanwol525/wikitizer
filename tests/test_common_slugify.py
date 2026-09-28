@@ -1,4 +1,4 @@
-"""Tests for evals/fc/slugify.py -- the golden-convention slug rules + the tolerant oracle.
+"""Tests for evals/common/slugify.py -- the golden-convention slug rules + the tolerant oracle.
 
 Fully offline. The golden cases are drawn straight from output/gol-lore-full.md so the pinned
 rules stay locked to the file they grade.
@@ -6,7 +6,7 @@ rules stay locked to the file they grade.
 
 import pytest
 
-from evals.fc.slugify import (
+from evals.common.slugify import (
     anchor_matches_name,
     has_non_ascii_letter,
     slug_bases,
