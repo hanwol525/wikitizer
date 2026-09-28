@@ -23,6 +23,7 @@ pydantic_core==2.46.4
 Pygments==2.20.0
 pytest==8.4.2
 python-dotenv==1.2.1
+PyYAML==6.0.2
 referencing==0.36.2
 rpds-py==0.27.1
 sniffio==1.3.1
