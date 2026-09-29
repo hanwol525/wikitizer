@@ -52,6 +52,12 @@ Python does the narrowing and the aggregation:
 - **Split sub-scores, no combined score.** `summary` = `{complete, faithfulness, ordering}`, each an
   applicable-only `{pass, partial, fail, na, applicable, score, score_display}`. Faithfulness and
   ordering measure different things and are never averaged.
+- **A `partial` earns HALF credit (GBF-only).** A partial (faithful but abridged — some gold claims
+  omitted, none contradicted — or a nearly-ordered timeline) is not a meaning contradiction, so
+  `score = (pass + 0.5·partial) / applicable` and `score_display` shows the weighted numerator
+  (`"7.5/10"`; integer like `"3/4"` when there are no partials). The unweighted `pass/partial/fail`
+  counts stay visible. This is GBF's own `evals/gbf/scoring.py`; FC and rubric keep `partial = fail`
+  via the untouched shared `score_block`.
 - **`complete` is run-level and derived** (`skipped == 0`): a degraded run reports `complete=false`.
 - **IDs are the join key** — `gbf.faithfulness.<gold-entry-slug>` (one per gold entry, the universe)
   + the single `gbf.ordering`.
@@ -94,6 +100,16 @@ gold with a *known* expected grade (`faithful` / `contradictions` / `omissions` 
 `expected.yaml`. `tests/test_gbf_bakeoff.py` (`@pytest.mark.integration`) runs candidate judges over
 it and reports agreement with the labels + vote stability. This is how the judge is chosen and how
 the ranks are proven before the eval is trusted.
+
+Faithfulness agreement is scored **fail-aware**: the fixtures are abridged paraphrases of the rich
+real gold, so a faithful judge legitimately returns `partial` (omitted gold claims) where a label
+optimistically says `pass`. Since `pass` and `partial` are one "faithful, no contradiction" class and
+only `fail` is distinct, the asserted number measures what actually matters — does the judge catch
+contradictions and not hallucinate them. The strict 3-way exact-match agreement and the `partial↔pass`
+"slips" are printed for calibration but never fail the build; ordering (deterministic) must stay
+perfect. Since the fail-aware bar alone is clearable by a contradiction-blind judge (~18 "ok" vs 2
+"fail"), the bake-off **also** asserts a **contradiction-recall floor**: the best candidate must flag
+every entry labeled `fail`.
 
 ## Scope (what this is NOT)
 

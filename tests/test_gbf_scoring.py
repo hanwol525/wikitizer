@@ -28,9 +28,11 @@ def test_summary_math_is_independent_per_bucket():
         _it("gbf.ordering", Status.PASS),
     ]
     s = build_gbf_summary(items)
-    # faithfulness: pass=1 partial=1 fail=1 na=1 -> applicable=3, score=1/3
-    assert s.faithfulness.n_pass == 1 and s.faithfulness.applicable == 3
-    assert s.faithfulness.score_display == "1/3"
+    # faithfulness: pass=1 partial=1 fail=1 na=1 -> applicable=3; partial earns HALF credit (GBF-only)
+    # so credit = 1 + 0.5 = 1.5 -> score = 1.5/3 = 0.5. The unweighted counts stay visible.
+    assert s.faithfulness.n_pass == 1 and s.faithfulness.partial == 1 and s.faithfulness.applicable == 3
+    assert s.faithfulness.score == 0.5
+    assert s.faithfulness.score_display == "1.5/3"
     # ordering: one pass -> 1/1
     assert s.ordering.n_pass == 1 and s.ordering.applicable == 1 and s.ordering.score == 1.0
 
