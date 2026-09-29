@@ -17,7 +17,7 @@ for the ``{"results":[{...}, ...]}`` reply shape:
 import logging
 from typing import List, Optional, Tuple
 
-from evals.common.adjudicator import BaseAdjudicator, _safe_parse
+from evals.common.adjudicator import BaseAdjudicator
 from evals.common.models import Engine, Evidence, Item, Status
 from evals.rubric.resolve import entity_slug
 
@@ -86,44 +86,9 @@ class RubricAdjudicator(BaseAdjudicator):
         return Item(id=cid, description=description, engine=Engine.MODEL, status=status,
                     evidence=evidence)
 
-    def _vote_records(self, system: str, user: str, n: int) -> Optional[List[List[dict]]]:
-        """Call the model ``self.votes`` times; parse each as ``{"results":[...]}`` of length
-        ``n``. Discard a reply whose length != n (or with a non-dict record) as an abstain.
-        Return the list of valid vote-record-lists, or ``None`` if every reply was malformed."""
-        valid: List[List[dict]] = []
-        for _ in range(self.votes):
-            parsed = _safe_parse(self.model_client.complete(system, user))
-            results = parsed.get("results") if isinstance(parsed, dict) else None
-            if not isinstance(results, list) or len(results) != n:
-                logger.debug("discarding a malformed rubric vote (results=%r)", results)
-                continue
-            if not all(isinstance(r, dict) for r in results):
-                logger.debug("discarding a rubric vote with a non-dict record")
-                continue
-            valid.append(results)
-        return valid or None
-
-    @staticmethod
-    def _fold_bool(votes: List[List[dict]], i: int, field: str) -> Tuple[bool, bool]:
-        """(majority, split) for ``results[*][i][field]`` read as bool. A tie resolves to
-        ``False`` (the strict/bad direction). ``split`` flags a non-unanimous decision. Only a
-        real JSON ``true`` counts as positive -- ``bool("false")`` is ``True``, so a stringly
-        ``"false"``/``"no"`` must not be read with ``bool()``; anything non-``True`` fails closed."""
-        decisions = [v[i].get(field) is True for v in votes]
-        trues = sum(decisions)
-        total = len(decisions)
-        majority = trues * 2 > total
-        split = 0 < trues < total
-        return majority, split
-
-    @staticmethod
-    def _companion(votes: List[List[dict]], i: int, field: str, companion: str, majority: bool):
-        """The companion value (``match`` index / ``span`` text) from the first vote whose
-        decision matches the resolved majority."""
-        for v in votes:
-            if (v[i].get(field) is True) == majority:
-                return v[i].get(companion)
-        return None
+    # ``_vote_records`` / ``_fold_bool`` / ``_companion`` are the shared record-voting engine,
+    # promoted to ``BaseAdjudicator`` (both rubric + gbf inherit them). ``_valid_match`` stays
+    # here -- it is rubric-specific (a 1-based section/entry match index).
 
     @staticmethod
     def _valid_match(votes: List[List[dict]], i: int, upper: int) -> Optional[int]:

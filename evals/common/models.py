@@ -111,6 +111,29 @@ class Summary(BaseModel):
     complete: bool
 
 
+class SubScore(BaseModel):
+    """One bucket's applicable-only tally (mirrors ``evals.common.scoring.ScoreBlock`` field for
+    field, which is why ``SubScore(**asdict(score_block(items)))`` works). It carries NO
+    ``complete``/``skipped`` -- those are run-level and live on the eval's own summary (rubric's
+    ``RubricSummary``, gbf's ``GbfSummary``). Shared by every eval whose summary splits into
+    independent sub-scores.
+
+    ``n_pass`` carries the JSON key ``"pass"`` -- the same reserved-keyword fix as ``Summary``
+    (``Field(alias="pass")`` + ``populate_by_name=True``). Serialize ``by_alias=True`` so the wire
+    key is ``"pass"``.
+    """
+
+    model_config = ConfigDict(populate_by_name=True, extra="forbid")
+
+    n_pass: int = Field(alias="pass")
+    partial: int
+    fail: int
+    na: int
+    applicable: int
+    score: Optional[float] = None
+    score_display: str
+
+
 class MechanicalGrader(BaseModel):
     """The deterministic linter, as recorded in a result's ``graders`` list."""
 

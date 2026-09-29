@@ -13,9 +13,9 @@ FC ``Summary`` (``Field(alias="pass")`` + ``populate_by_name=True``). Serialize 
 """
 
 from datetime import datetime
-from typing import Literal, Optional
+from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict
 
 from evals.common import SCHEMA_VERSION
 from evals.common.models import (  # re-exported for rubric call sites + tests
@@ -26,6 +26,7 @@ from evals.common.models import (  # re-exported for rubric call sites + tests
     MechanicalGrader,
     ModelGrader,
     Status,
+    SubScore,
 )
 
 __all__ = [
@@ -40,21 +41,6 @@ __all__ = [
     "Status",
     "SubScore",
 ]
-
-
-class SubScore(BaseModel):
-    """One bucket's applicable-only tally (mirrors ``evals.common.scoring.ScoreBlock``). It
-    carries NO ``complete``/``skipped`` -- those are run-level and live on ``RubricSummary``."""
-
-    model_config = ConfigDict(populate_by_name=True, extra="forbid")
-
-    n_pass: int = Field(alias="pass")
-    partial: int
-    fail: int
-    na: int
-    applicable: int
-    score: Optional[float] = None
-    score_display: str
 
 
 class RubricSummary(BaseModel):
