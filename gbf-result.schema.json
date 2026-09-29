@@ -50,7 +50,7 @@
     "status": {
       "type": "string",
       "enum": ["pass", "partial", "fail", "na", "skipped"],
-      "description": "Result for one criterion. pass/fail as expected. partial = partially met (faithfulness: some gold claims omitted, none contradicted; ordering: a small number of inversions); SCORES as a fail but kept visible. na = criterion does not apply to this WOF (faithfulness: the gold entry is absent from the WOF; ordering: fewer than 2 rankable events present); excluded from the denominator. skipped = not evaluated this run (the model was disabled/unavailable, or a check degraded); excluded from the denominator AND flips summary.complete to false."
+      "description": "Result for one criterion. pass/fail as expected. partial = partially met (faithfulness: some gold claims omitted, none contradicted; ordering: a small number of inversions); a partial is NOT a contradiction, so in GBF it earns HALF credit in the sub-scores (weight 0.5) and is kept visible separately (unlike FC/rubric, where partial scores as a fail). na = criterion does not apply to this WOF (faithfulness: the gold entry is absent from the WOF; ordering: fewer than 2 rankable events present); excluded from the denominator. skipped = not evaluated this run (the model was disabled/unavailable, or a check degraded); excluded from the denominator AND flips summary.complete to false."
     },
     "evidence": {
       "type": "object",
@@ -104,12 +104,12 @@
       "description": "One bucket's applicable-only tally. No complete/skipped here — those are run-level on the summary.",
       "properties": {
         "pass": { "type": "integer", "minimum": 0 },
-        "partial": { "type": "integer", "minimum": 0, "description": "Counts toward fail in scoring; surfaced separately." },
+        "partial": { "type": "integer", "minimum": 0, "description": "Count of partials (unweighted); surfaced separately. In GBF each earns half credit in score (weight 0.5)." },
         "fail": { "type": "integer", "minimum": 0 },
         "na": { "type": "integer", "minimum": 0, "description": "Excluded from the denominator." },
         "applicable": { "type": "integer", "minimum": 0, "description": "pass + partial + fail. The denominator (na and skipped excluded)." },
-        "score": { "type": ["number", "null"], "minimum": 0, "maximum": 1, "description": "pass / applicable, in 0..1. null when applicable == 0." },
-        "score_display": { "type": "string", "examples": ["8/10"] }
+        "score": { "type": ["number", "null"], "minimum": 0, "maximum": 1, "description": "(pass + 0.5*partial) / applicable, in 0..1 -- GBF weights a partial at half credit. null when applicable == 0." },
+        "score_display": { "type": "string", "description": "The weighted numerator over applicable; the numerator shows the .5 only when a partial is present.", "examples": ["8/10", "7.5/10"] }
       }
     },
     "summary": {
