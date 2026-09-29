@@ -48,3 +48,24 @@ def test_grader_discriminated_union_parses_both():
     assert isinstance(mech, MechanicalGrader)
     assert isinstance(model, ModelGrader)
     assert model.name == "qwen/qwen3-8b"
+
+
+# --- SubScore now lives here (promoted from evals/rubric/models.py; Brief C §1a) ------------ #
+
+def test_subscore_is_importable_from_common():
+    from evals.common.models import SubScore
+    # rubric re-exports it; both names must be the SAME class after the move.
+    from evals.rubric.models import SubScore as RubricSubScore
+    assert SubScore is RubricSubScore
+
+
+def test_subscore_pass_alias_and_extra_forbidden():
+    from evals.common.models import SubScore
+    sub = SubScore(**{"pass": 2, "partial": 0, "fail": 1, "na": 0, "applicable": 3,
+                      "score": 0.6667, "score_display": "2/3"})
+    assert sub.n_pass == 2
+    d = sub.model_dump(mode="json", by_alias=True)
+    assert d["pass"] == 2 and "n_pass" not in d
+    with pytest.raises(ValidationError):
+        SubScore(**{"pass": 0, "partial": 0, "fail": 0, "na": 0, "applicable": 0,
+                    "score": None, "score_display": "0/0", "bogus": 1})

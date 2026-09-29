@@ -1,0 +1,158 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://wikitizer.local/schemas/gbf-result.schema.json",
+  "title": "GBF Eval Result",
+  "description": "One GBF (Golden-Baseline-File) grading result for a single Wiki Output File (WOF). GBF asks, for the entries the WOF actually contains: is its prose faithful in meaning to the gold, and are its History events in the right chronological order? This is the GBF instance of a shared eval envelope (FC uses eval=\"fc\" with a flat summary; the rubric uses eval=\"rubric\" with presence/sourcing sub-scores). GBF reuses the same status vocabulary (pass/partial/fail/na/skipped): a faithfulness item folds per-claim affirmed/contradicted/omitted verdicts into one status (any contradiction -> fail, all affirmed -> pass, some omitted -> partial, entity absent -> na), and those per-claim verdicts live only in the item's evidence text, never as a status. GBF is all-model: every item has engine=\"model\". Emitted files are plain JSON with no comments. The Pydantic v2 models in evals/gbf/models.py + evals/common/models.py are the real contract; this schema mirrors them.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["eval", "schema_version", "wof", "graded_at", "graders", "summary", "items"],
+  "properties": {
+    "eval": {
+      "const": "gbf",
+      "description": "Which eval produced this file. Const \"gbf\" here so the GBF schema validates strictly; fc/rubric are sibling schemas that reuse the $defs below."
+    },
+    "schema_version": {
+      "type": "string",
+      "pattern": "^\\d+\\.\\d+$",
+      "description": "Version of THIS envelope shape (not the gold contents). Bump only when the envelope structure changes.",
+      "examples": ["1.0"]
+    },
+    "wof": {
+      "type": "string",
+      "description": "Filename or path of the graded Wiki Output File. The join key that ties the fc/rubric/gbf results for one run together.",
+      "examples": ["wiki-2026-09-23T14-30-00.md"]
+    },
+    "graded_at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "UTC timestamp when this result was produced."
+    },
+    "graders": {
+      "type": "array",
+      "minItems": 1,
+      "description": "Who/what produced the results. GBF is all-model, so this is a single model grader (GBF has no mechanical grader; whether the model actually ran is carried by summary.complete + item skipped status).",
+      "items": { "$ref": "#/$defs/grader" }
+    },
+    "summary": { "$ref": "#/$defs/summary" },
+    "items": {
+      "type": "array",
+      "minItems": 1,
+      "description": "One entry per criterion evaluated. Keyed by stable id: gbf.faithfulness.<gold-entry-slug> (one per gold entry, the universe) + the single gbf.ordering.",
+      "items": { "$ref": "#/$defs/item" }
+    }
+  },
+  "$defs": {
+    "engine": {
+      "type": "string",
+      "enum": ["mechanical", "model"],
+      "description": "Which engine judged this. GBF only ever emits \"model\" (ordering rests on the model-produced pairing)."
+    },
+    "status": {
+      "type": "string",
+      "enum": ["pass", "partial", "fail", "na", "skipped"],
+      "description": "Result for one criterion. pass/fail as expected. partial = partially met (faithfulness: some gold claims omitted, none contradicted; ordering: a small number of inversions); SCORES as a fail but kept visible. na = criterion does not apply to this WOF (faithfulness: the gold entry is absent from the WOF; ordering: fewer than 2 rankable events present); excluded from the denominator. skipped = not evaluated this run (the model was disabled/unavailable, or a check degraded); excluded from the denominator AND flips summary.complete to false."
+    },
+    "evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["lines", "detail"],
+      "description": "Why the status was assigned. Required on every item.",
+      "properties": {
+        "lines": {
+          "type": "array",
+          "items": { "type": "integer", "minimum": 1 },
+          "description": "Line number(s) in the WOF the finding refers to. Empty for whole-document checks."
+        },
+        "detail": {
+          "type": "string",
+          "description": "A one-line rationale. Faithfulness names the contradicted/omitted gold claims and appends any WOF-only claims as [EXTRA] notes (orthogonal to the status). Ordering names the out-of-order pairs."
+        },
+        "expected": {
+          "type": "string",
+          "description": "Optional. What was expected."
+        },
+        "found": {
+          "type": "string",
+          "description": "Optional. What was actually present (e.g. a supporting WOF span)."
+        }
+      }
+    },
+    "item": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "engine", "status", "evidence"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^gbf\\.[^\\s.]+(\\.[^\\s.]+)*$",
+          "description": "Stable criterion id (dotted gbf.* slug). The ONLY join key; results reference the id, never the prose. Faithfulness tokens embed gold-entry slugs which may contain non-ASCII letters, so the pattern allows any non-dot, non-whitespace token.",
+          "examples": ["gbf.faithfulness.aldenburg", "gbf.faithfulness.skjöldr-aldvarðr", "gbf.ordering"]
+        },
+        "description": {
+          "type": "string",
+          "description": "Informational copy of the criterion text. NOT authoritative; the id wins. Safe to omit."
+        },
+        "engine": { "$ref": "#/$defs/engine" },
+        "status": { "$ref": "#/$defs/status" },
+        "evidence": { "$ref": "#/$defs/evidence" }
+      }
+    },
+    "subscore": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["pass", "partial", "fail", "na", "applicable", "score", "score_display"],
+      "description": "One bucket's applicable-only tally. No complete/skipped here — those are run-level on the summary.",
+      "properties": {
+        "pass": { "type": "integer", "minimum": 0 },
+        "partial": { "type": "integer", "minimum": 0, "description": "Counts toward fail in scoring; surfaced separately." },
+        "fail": { "type": "integer", "minimum": 0 },
+        "na": { "type": "integer", "minimum": 0, "description": "Excluded from the denominator." },
+        "applicable": { "type": "integer", "minimum": 0, "description": "pass + partial + fail. The denominator (na and skipped excluded)." },
+        "score": { "type": ["number", "null"], "minimum": 0, "maximum": 1, "description": "pass / applicable, in 0..1. null when applicable == 0." },
+        "score_display": { "type": "string", "examples": ["8/10"] }
+      }
+    },
+    "summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["complete", "faithfulness", "ordering"],
+      "description": "Two independent sub-scores under a run-level complete. There is no combined top score. items[] is the source of truth.",
+      "properties": {
+        "complete": { "type": "boolean", "description": "false when any item was skipped (the model was off/unavailable, or a check degraded). Makes a provisional grade visibly provisional." },
+        "faithfulness": { "$ref": "#/$defs/subscore" },
+        "ordering": { "$ref": "#/$defs/subscore" }
+      }
+    },
+    "mechanicalGrader": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["engine", "tool", "version"],
+      "properties": {
+        "engine": { "const": "mechanical" },
+        "tool": { "type": "string" },
+        "version": { "type": "string" }
+      }
+    },
+    "modelGrader": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["engine", "name", "provider", "temperature", "thinking", "votes"],
+      "properties": {
+        "engine": { "const": "model" },
+        "name": { "type": "string", "examples": ["deepseek/deepseek-v4-pro-0813"] },
+        "provider": { "type": "string", "examples": ["openrouter"] },
+        "endpoint": { "type": "string", "description": "Optional. Pinned provider or base_url." },
+        "temperature": { "type": "number", "examples": [0.6] },
+        "thinking": { "type": "boolean", "examples": [false] },
+        "votes": { "type": "integer", "minimum": 1, "examples": [5] }
+      }
+    },
+    "grader": {
+      "oneOf": [
+        { "$ref": "#/$defs/mechanicalGrader" },
+        { "$ref": "#/$defs/modelGrader" }
+      ],
+      "description": "A mechanical grader or a model grader, discriminated on engine. GBF only emits a model grader."
+    }
+  }
+}

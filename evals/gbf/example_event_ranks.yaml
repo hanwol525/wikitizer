@@ -1,0 +1,18 @@
+# Fabricated example event-ranks for an INVENTED campaign ("The Sundered Reaches").
+#
+# This file is COMMITTED as the schema reference for output/gbf_event_ranks.yaml and as the offline
+# test fixture (so a fresh clone can run the GBF tests without the gitignored real ranks). The real
+# ranks live in output/gbf_event_ranks.yaml (gitignored) and are what a real grading run uses; this
+# one intentionally names nothing from any real campaign. Its slugs match the History events of the
+# fabricated WOF fixtures under tests/fixtures/gbf/.
+#
+# Shape: a flat mapping of gold-event-slug -> chronological rank (1 = earliest). Co-temporal events
+# SHARE a rank (swapping them is not an inversion). Events omitted here (e.g. "Could Not Place"
+# entries) are excluded from the ordering check.
+
+the-founding-of-aldenburg: 1
+the-first-sundering: 2
+the-war-of-ashes: 3
+the-siege-of-mistfen: 3            # co-temporal with the war (same era)
+the-rise-of-the-iron-concord: 4
+the-second-sundering: 5

@@ -115,3 +115,48 @@ class BaseAdjudicator:
             lines=off_lines,
             detail=f"{len(offenders)} of {len(candidates)} candidate(s) flagged" + note,
             found="; ".join(str(x) for x in names[:8])))
+
+    # --- record voting ({"results":[{...}, ...]} replies) ------------------- #
+    # The record-shaped sibling of ``_vote`` (which folds a flat ``{"verdicts":[...]}`` label
+    # list). Evals whose per-candidate reply is a dict-per-record (rubric's present/match, gbf's
+    # pairing) share this hygiene here rather than each redefining it. ``_fold_bool`` / ``_companion``
+    # fold one field across the votes; a subclass adds any label-specific resolution on top.
+
+    def _vote_records(self, system: str, user: str, n: int) -> Optional[List[List[dict]]]:
+        """Call the model ``self.votes`` times; parse each as ``{"results":[...]}`` of length
+        ``n``. Discard a reply whose length != n (or with a non-dict record) as an abstain.
+        Return the list of valid vote-record-lists, or ``None`` if every reply was malformed."""
+        valid: List[List[dict]] = []
+        for _ in range(self.votes):
+            parsed = _safe_parse(self.model_client.complete(system, user))
+            results = parsed.get("results") if isinstance(parsed, dict) else None
+            if not isinstance(results, list) or len(results) != n:
+                logger.debug("discarding a malformed record vote (results=%r)", results)
+                continue
+            if not all(isinstance(r, dict) for r in results):
+                logger.debug("discarding a record vote with a non-dict record")
+                continue
+            valid.append(results)
+        return valid or None
+
+    @staticmethod
+    def _fold_bool(votes: List[List[dict]], i: int, field: str) -> Tuple[bool, bool]:
+        """(majority, split) for ``results[*][i][field]`` read as bool. A tie resolves to
+        ``False`` (the strict/bad direction). ``split`` flags a non-unanimous decision. Only a
+        real JSON ``true`` counts as positive -- ``bool("false")`` is ``True``, so a stringly
+        ``"false"``/``"no"`` must not be read with ``bool()``; anything non-``True`` fails closed."""
+        decisions = [v[i].get(field) is True for v in votes]
+        trues = sum(decisions)
+        total = len(decisions)
+        majority = trues * 2 > total
+        split = 0 < trues < total
+        return majority, split
+
+    @staticmethod
+    def _companion(votes: List[List[dict]], i: int, field: str, companion: str, majority: bool):
+        """The companion value (``match`` index / ``span`` text) from the first vote whose
+        decision matches the resolved majority."""
+        for v in votes:
+            if (v[i].get(field) is True) == majority:
+                return v[i].get(companion)
+        return None

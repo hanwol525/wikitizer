@@ -85,3 +85,39 @@ def test_unknown_labels_ignored_then_fail_closed_when_all_unknown():
     item = _Judge(fake, votes=3).judge("c.group", [{"label": "X", "lineno": 3}], *_GROUP)
     # No recognized label for the candidate -> resolved to the bad label -> fail.
     assert item.status == Status.FAIL
+
+
+# --- record voting now lives on BaseAdjudicator (promoted from rubric; Brief C §1b) --------- #
+
+def _records(*objs):
+    return json.dumps({"results": list(objs)})
+
+
+def test_record_voting_methods_live_on_base():
+    # Both rubric + gbf adjudicators inherit these; the engine itself is on the base class.
+    for name in ("_vote_records", "_fold_bool", "_companion"):
+        assert hasattr(BaseAdjudicator, name)
+
+
+def test_vote_records_discards_wrong_length_and_folds_bool():
+    base = BaseAdjudicator(FakeModelClient([
+        _records({"present": True, "match": 1}),                 # valid (len 1)
+        _records({"present": True}, {"present": False}),         # wrong length (2) -> discarded
+        _records({"present": True, "match": 1}),                 # valid
+    ]), votes=3)
+    votes = base._vote_records("sys", "user", 1)
+    assert votes is not None and len(votes) == 2                 # the wrong-length reply was dropped
+    majority, split = base._fold_bool(votes, 0, "present")
+    assert majority is True and split is False
+    assert base._companion(votes, 0, "present", "match", True) == 1
+
+
+def test_vote_records_all_malformed_returns_none():
+    base = BaseAdjudicator(FakeModelClient(["not json", "[]"]), votes=2)
+    assert base._vote_records("sys", "user", 1) is None
+
+
+def test_fold_bool_tie_resolves_false():
+    votes = [[{"flag": True}], [{"flag": False}]]                # 1 vs 1 tie
+    majority, split = BaseAdjudicator._fold_bool(votes, 0, "flag")
+    assert majority is False and split is True                   # tie -> strict False, flagged split

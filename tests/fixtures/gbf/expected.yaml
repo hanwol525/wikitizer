@@ -1,0 +1,52 @@
+# Hand-labeled ground truth for the GBF adversarial validation set (Brief C §4).
+#
+# Each variant is a WOF derived from the gold (output/gol-lore-full.md) with a KNOWN expected grade.
+# tests/test_gbf_bakeoff.py (integration-gated) runs candidate judge models over these against the
+# real gold and reports agreement + vote stability — this is how the judge is chosen and the ranks
+# proven before the eval is trusted.
+#
+# NOTE (Han): the ORDERING labels are confirmed by pure-Python replay (faithful=pass/0 inversions,
+# reordered=fail/10 inversions with the co-temporal ~120ya swap adding none). The FAITHFULNESS
+# labels are BEST-EFFORT — eyeball + adjust: a stricter judge may read a faithful paraphrase that
+# drops a minor sub-claim as `partial` rather than `pass`. The variants deliberately paraphrase the
+# in-world lore only (no verbatim quotes, no player names) so this set is safe to commit.
+#
+# Shape: <variant-filename>: {ordering: <status>, faithfulness: {<gold-entry-slug>: <status>}}.
+# Only the entries PRESENT in the variant are listed; every other gold entry is `na` (absent) and is
+# not scored. Statuses use the shared vocabulary (pass/partial/fail/na).
+
+faithful.md:
+  ordering: pass
+  faithfulness:
+    aldenburg: pass
+    aprus: pass
+    citadel: pass
+    kriggy-krieger: pass
+    skjöldr-aldvarðr: pass
+
+contradictions.md:
+  ordering: pass
+  faithfulness:
+    aldenburg: fail          # relocated to Aprus (gold: a city in Kriega) + denies the Aldward tie
+    skjöldr-aldvarðr: fail    # made Kriggy's son (gold: his bodyguard, explicitly not family)
+    aprus: pass
+    citadel: pass
+    kriggy-krieger: pass
+
+omissions.md:
+  ordering: pass
+  faithfulness:
+    citadel: partial          # drops the founding-date / Citadel-dating claim; nothing contradicted
+    aldenburg: pass
+    aprus: pass
+    kriggy-krieger: pass
+    skjöldr-aldvarðr: pass
+
+reordered.md:
+  ordering: fail             # Final Conquests (rank 8) placed first -> 10 inversions
+  faithfulness:
+    aprus: pass               # adds an unverifiable saffron-trade claim -> an [EXTRA] note, still pass
+    aldenburg: pass
+    citadel: pass
+    kriggy-krieger: pass
+    skjöldr-aldvarðr: pass
