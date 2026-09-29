@@ -112,6 +112,62 @@ def test_evidence_carries_span_and_lineno():
     assert item.evidence.lines == [42]
 
 
+def test_cased_and_padded_verdicts_are_normalized():
+    item = _judge([faith([_claim("in the north", "Affirmed ", "northern town"),
+                          _claim("a town", " AFFIRMED", "town")])], votes=1)
+    assert item.status == Status.PASS
+
+
+def test_cased_contradiction_fails_with_evidence():
+    # A "Contradicted" vote must FAIL *and* surface its claim/span (the evidence loop normalizes too).
+    item = _judge([faith([_claim("ruled by Baron Aldric", "Contradicted",
+                                 "ruled by a merchant council")])], votes=1)
+    assert item.status == Status.FAIL
+    assert "contradicted: ruled by Baron Aldric" in item.evidence.detail
+    assert "merchant council" in item.evidence.detail
+
+
+def test_cased_omission_partials_with_evidence():
+    item = _judge([faith([_claim("in the north", "affirmed", "northern town"),
+                          _claim("ruled by Baron Aldric", " Omitted", "ruled by Baron Aldric")])], votes=1)
+    assert item.status == Status.PARTIAL
+    assert "omitted: ruled by Baron Aldric" in item.evidence.detail
+
+
+def test_garbage_verdict_abstains_and_fails_closed():
+    # An off-menu verdict is unusable, not a quiet PARTIAL -> abstain -> fail closed with [REVIEW].
+    item = _judge([faith([_claim("in the north", "affirmed", "northern town"),
+                          _claim("ruled by Baron Aldric", "garbage", "")])], votes=1)
+    assert item.status == Status.FAIL
+    assert "[REVIEW]" in item.evidence.detail
+
+
+def test_missing_verdict_abstains_and_fails_closed():
+    item = _judge([json.dumps({"claims": [{"claim": "in the north", "span": "northern town"}]})],
+                  votes=1)
+    assert item.status == Status.FAIL
+    assert "[REVIEW]" in item.evidence.detail
+
+
+def test_contradiction_beside_garbage_verdict_still_fails_on_the_contradiction():
+    # A real contradiction is decisive even when a sibling verdict is junk -- it is a FAIL vote,
+    # not an abstain, so its evidence is reported (no no-verdicts [REVIEW]).
+    item = _judge([faith([_claim("ruled by Baron Aldric", "contradicted", "ruled by a council"),
+                          _claim("in the north", "garbage", "")])], votes=1)
+    assert item.status == Status.FAIL
+    assert "contradicted: ruled by Baron Aldric" in item.evidence.detail
+    assert "no parseable" not in item.evidence.detail
+
+
+def test_garbage_vote_abstains_and_majority_forms_from_the_rest():
+    # One junk-verdict vote abstains; the remaining two PASS votes are a strict majority.
+    reps = [faith([_claim("x", "garbage", "x")]),
+            faith([_claim("x", "affirmed", "x")]),
+            faith([_claim("x", "affirmed", "x")])]
+    item = _judge(reps, votes=3)
+    assert item.status == Status.PASS
+
+
 def test_all_malformed_fails_closed():
     item = _judge(["[]", json.dumps({"foo": 1})], votes=2)   # non-dict, then dict-with-no-claims
     assert item.status == Status.FAIL

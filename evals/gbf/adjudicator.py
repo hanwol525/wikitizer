@@ -59,6 +59,15 @@ def _clip(text: str, n: int = _BODY_CLIP) -> str:
     return text if len(text) <= n else text[: n - 1] + "…"
 
 
+_VERDICTS = ("affirmed", "contradicted", "omitted")
+
+
+def _norm_verdict(verdict) -> str:
+    """Case/whitespace-fold a claim verdict so a harmless ``"Affirmed "`` compares equal to
+    ``"affirmed"``. No synonym mapping -- anything still off-menu is treated as unusable."""
+    return str(verdict).strip().lower()
+
+
 def _body(entry) -> str:
     """An entry's prose for meaning judgment: its body, falling back to the raw heading line when the
     body is empty (a name-only entry still gives the model something to compare)."""
@@ -124,18 +133,23 @@ class GbfAdjudicator(BaseAdjudicator):
     def _vote_label(vote: dict) -> Optional[Status]:
         """Derive one vote's faithfulness label from its claim verdicts, or ``None`` (abstain) when
         the vote yields NO usable claim verdicts -- a missing/non-list ``claims``, an empty list, or
-        a list with no dict records. Any contradiction -> FAIL; all affirmed -> PASS; else (some
-        omitted, none contradicted) -> PARTIAL. An abstain is filtered before the fold, so a judge
-        that systematically extracts nothing fails CLOSED (all-abstain -> the no-verdicts path) rather
-        than being recorded as a quiet PARTIAL on a ``complete`` run."""
+        a list with no dict records. Verdicts are normalized first (``_norm_verdict``). Any
+        contradiction -> FAIL (decisive, checked BEFORE validity so a real contradiction beside a
+        junk verdict still counts); any verdict still off-menu (junk, missing, ...) -> abstain; all
+        affirmed -> PASS; else (some omitted, none contradicted) -> PARTIAL. An abstain is filtered
+        before the fold, so a judge that systematically extracts nothing usable fails CLOSED
+        (all-abstain -> the no-verdicts path) rather than being recorded as a quiet PARTIAL on a
+        ``complete`` run."""
         claims = vote.get("claims")
         if not isinstance(claims, list):
             return None
-        verdicts = [c.get("verdict") for c in claims if isinstance(c, dict)]
+        verdicts = [_norm_verdict(c.get("verdict")) for c in claims if isinstance(c, dict)]
         if not verdicts:
             return None
         if any(v == "contradicted" for v in verdicts):
             return Status.FAIL
+        if any(v not in _VERDICTS for v in verdicts):
+            return None
         if all(v == "affirmed" for v in verdicts):
             return Status.PASS
         return Status.PARTIAL
@@ -182,7 +196,7 @@ class GbfAdjudicator(BaseAdjudicator):
         claims = [c for c in (chosen.get("claims") or []) if isinstance(c, dict)]
         bad = []
         for c in claims:
-            verd = c.get("verdict")
+            verd = _norm_verdict(c.get("verdict"))
             if verd in ("contradicted", "omitted"):
                 txt = str(c.get("claim") or "").strip()
                 span = str(c.get("span") or "").strip()

@@ -32,8 +32,9 @@ Python does the narrowing and the aggregation:
   pairing miss never hides inside a meaning verdict, and ordering reuses the same map (zero new calls).
 - **Faithfulness (`adjudicator.py`), one gold/WOF pair per call, voted (default 5×).** The judge
   extracts the gold entry's key claims and marks each `affirmed` / `contradicted` / `omitted` in the
-  WOF, plus lists WOF-only claims as `extra`. Python folds each vote to a label (any contradiction →
-  `fail`; all affirmed → `pass`; else → `partial`), majority-votes the labels (tie/all-malformed →
+  WOF, plus lists WOF-only claims as `extra`. Python case/whitespace-normalizes each verdict, then
+  folds each vote to a label (any contradiction → `fail`; any other off-menu or missing verdict →
+  the vote abstains; all affirmed → `pass`; else → `partial`), majority-votes the labels (tie/all-malformed →
   `fail` + `[REVIEW]`, strict), and names the offending claims in the evidence. `[EXTRA]` notes are
   **orthogonal to the status** — they surface but never move the score.
 - **Ordering (`ordering.py`), pure Python, no model call.** The gold's `{slug: rank}` map is the
