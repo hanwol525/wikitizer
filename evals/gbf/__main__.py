@@ -20,6 +20,7 @@ import yaml
 
 from evals.common.model_client import build_model_client
 from evals.gbf import (
+    DEFAULT_GBF_MODEL,
     DEFAULT_GBF_VOTES,
     DEFAULT_GOLD_PATH,
     DEFAULT_MAX_WORKERS,
@@ -110,7 +111,7 @@ def main(argv=None) -> int:
     use_model = not args.no_model
     if use_model:
         try:
-            model_client = build_model_client(prefix=MODEL_PREFIX)
+            model_client = build_model_client(prefix=MODEL_PREFIX, default_model=DEFAULT_GBF_MODEL)
         except Exception as exc:                       # noqa: BLE001
             logger.warning("[REVIEW] model client unavailable (%s); every criterion will be skipped.", exc)
             model_client = None

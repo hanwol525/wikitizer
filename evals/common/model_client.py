@@ -20,7 +20,7 @@ already covers it.
 ``build_model_client(env, prefix="FC")`` reads ``WIKITIZER_<prefix>_MODEL`` /
 ``WIKITIZER_<prefix>_TEMPERATURE`` plus the shared ``LLM_OPENAI_*`` gateway, so each eval
 gets its own overridable judge config (FC uses the default ``"FC"`` prefix; the rubric
-passes ``"RUBRIC"``).
+passes ``"RUBRIC"``). An eval with its own judge passes ``default_model`` (GBF: pinned DeepSeek).
 """
 
 import logging
@@ -93,12 +93,15 @@ class OpenAICompatModelClient:
         return strip_think(content)
 
 
-def build_model_client(env=None, prefix: str = "FC") -> Optional[OpenAICompatModelClient]:
+def build_model_client(env=None, prefix: str = "FC",
+                       default_model: Optional[str] = None) -> Optional[OpenAICompatModelClient]:
     """Build the eval judge client from the environment, or return None when the OpenAI-compat
     credentials aren't set (which drives the runner's SKIPPED path -- same spirit as the
     integration tests' ``skipif`` on a missing key). The model/temperature are read from
     ``WIKITIZER_<prefix>_MODEL`` / ``WIKITIZER_<prefix>_TEMPERATURE`` so the judge is swappable
-    per eval via .env (``prefix="FC"`` by default; the rubric passes ``prefix="RUBRIC"``)."""
+    per eval via .env (``prefix="FC"`` by default; the rubric passes ``prefix="RUBRIC"``). An eval
+    whose judge differs from the shared ``DEFAULT_MODEL`` passes its own ``default_model`` (GBF's
+    pinned DeepSeek), used when ``WIKITIZER_<prefix>_MODEL`` is unset/blank."""
     env = os.environ if env is None else env
     base_url = env.get(ENV_OPENAI_BASE_URL)
     api_key = env.get(ENV_OPENAI_API_KEY)
@@ -106,7 +109,7 @@ def build_model_client(env=None, prefix: str = "FC") -> Optional[OpenAICompatMod
         return None
     env_model = f"WIKITIZER_{prefix}_MODEL"
     env_temperature = f"WIKITIZER_{prefix}_TEMPERATURE"
-    model = env.get(env_model) or DEFAULT_MODEL
+    model = env.get(env_model) or default_model or DEFAULT_MODEL
     raw_temp = env.get(env_temperature)
     try:
         temperature = float(raw_temp) if raw_temp else DEFAULT_TEMPERATURE

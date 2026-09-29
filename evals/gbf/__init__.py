@@ -19,8 +19,8 @@ Run it::
                         [--gold PATH] [--ranks PATH]
 
 The default judge is DeepSeek (``deepseek/deepseek-v4-pro-0813``, a PINNED dated slug) via the
-shared OpenAI-compat gateway; set it with ``WIKITIZER_GBF_MODEL`` (unset falls back to the shared
-``DEFAULT_MODEL``). GBF runs hotter than the other evals (votes default 5 -- faithfulness is the
+shared OpenAI-compat gateway; override it with ``WIKITIZER_GBF_MODEL`` (unset/blank -> the pinned
+``DEFAULT_GBF_MODEL``, NOT the shared Qwen ``DEFAULT_MODEL``). GBF runs hotter than the other evals (votes default 5 -- faithfulness is the
 fuzziest judgment).
 """
 
@@ -32,6 +32,11 @@ ENV_VOTES = "WIKITIZER_GBF_VOTES"
 
 # The model-client env prefix -> WIKITIZER_GBF_MODEL / WIKITIZER_GBF_TEMPERATURE.
 MODEL_PREFIX = "GBF"
+
+# GBF's own default judge, used when WIKITIZER_GBF_MODEL is unset (instead of the shared Qwen
+# DEFAULT_MODEL). A PINNED dated slug -- never a -latest redirect -- so a longitudinal eval's judge
+# can't drift.
+DEFAULT_GBF_MODEL = "deepseek/deepseek-v4-pro-0813"
 
 # The gold reference WOF (gitignored campaign content; missing is a hard error -- it IS the
 # reference). A fabricated schema-reference/fixture is not needed here: the committed FC/rubric

@@ -77,7 +77,7 @@ client** — just the model string:
 ```
 LLM_OPENAI_BASE_URL=https://openrouter.ai/api/v1
 LLM_OPENAI_API_KEY=<your OpenRouter key>
-WIKITIZER_GBF_MODEL=deepseek/deepseek-v4-pro-0813   # PINNED; unset falls back to the shared default
+WIKITIZER_GBF_MODEL=deepseek/deepseek-v4-pro-0813   # PINNED; also the built-in default when unset
 ```
 
 and (all optional, swappable) `WIKITIZER_GBF_TEMPERATURE`, `WIKITIZER_GBF_VOTES` (default **5** —

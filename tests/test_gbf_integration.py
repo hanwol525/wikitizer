@@ -1,4 +1,4 @@
-"""Live end-to-end GBF test against the real judge (DeepSeek/Qwen via OpenRouter). Opt-in only:
+"""Live end-to-end GBF test against the real judge (pinned DeepSeek by default, or WIKITIZER_GBF_MODEL, via OpenRouter). Opt-in only:
 ``pytest -m integration -k gbf``. Skips when LLM_OPENAI_* is absent or the gitignored gold / ranks
 are missing. Assertions are loose because LLM output isn't deterministic.
 """
@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 
 from evals.common.model_client import build_model_client
+from evals.gbf import DEFAULT_GBF_MODEL
 from evals.gbf.emit import result_to_json
 from evals.gbf.reference import load_gold, load_ranks
 from evals.gbf.runner import grade_file
@@ -44,7 +45,7 @@ def test_live_gbf_grades_gold_against_itself():
     # The gold graded against ITSELF is the strongest self-check: faithfulness should be near-perfect
     # and ordering should pass.
     jsonschema = pytest.importorskip("jsonschema")
-    client = build_model_client(prefix="GBF")
+    client = build_model_client(prefix="GBF", default_model=DEFAULT_GBF_MODEL)
     assert client is not None
     gold = load_gold(_GOLD)
     ranks = load_ranks(_RANKS)

@@ -46,6 +46,17 @@ def test_build_reads_env_defaults_and_overrides():
     assert c2.model == "meta/other" and c2.temperature == 0.3
 
 
+def test_build_eval_specific_default_model():
+    creds = {"LLM_OPENAI_BASE_URL": "https://x", "LLM_OPENAI_API_KEY": "k"}
+    # unset (or blank) env model -> the eval's own default, not the shared Qwen one
+    assert build_model_client(creds, prefix="GBF", default_model="pinned/judge").model == "pinned/judge"
+    assert build_model_client({**creds, "WIKITIZER_GBF_MODEL": ""}, prefix="GBF",
+                              default_model="pinned/judge").model == "pinned/judge"
+    # the env var still wins over the eval default
+    assert build_model_client({**creds, "WIKITIZER_GBF_MODEL": "meta/other"}, prefix="GBF",
+                              default_model="pinned/judge").model == "meta/other"
+
+
 def test_build_tolerates_bad_temperature():
     c = build_model_client({"LLM_OPENAI_BASE_URL": "https://x", "LLM_OPENAI_API_KEY": "k",
                             "WIKITIZER_FC_TEMPERATURE": "not-a-number"})

@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from evals.gbf import DEFAULT_GOLD_PATH, DEFAULT_RANKS_PATH
+from evals.gbf import DEFAULT_GBF_MODEL, DEFAULT_GOLD_PATH, DEFAULT_RANKS_PATH
 from evals.gbf import __main__ as cli
 
 main = cli.main
@@ -61,6 +61,34 @@ def test_main_no_model_writes_schema_valid_json(tmp_path, capsys):
     assert data["eval"] == "gbf" and data["summary"]["complete"] is False
     # stdout also carries the JSON
     assert '"eval": "gbf"' in capsys.readouterr().out
+
+
+def test_main_no_model_records_gbf_default_judge(tmp_path):
+    wof, gold, ranks = _files(tmp_path)
+    out = tmp_path / "g.json"
+    main(["--no-model", "--gold", str(gold), "--ranks", str(ranks), "--out", str(out), str(wof)])
+    data = json.loads(out.read_text(encoding="utf-8"))
+    assert data["graders"][0]["name"] == DEFAULT_GBF_MODEL
+
+
+def test_main_unset_env_model_uses_gbf_default(tmp_path, monkeypatch):
+    # Credentials set but WIKITIZER_GBF_MODEL unset/blank -> the pinned GBF judge, NOT the shared
+    # Qwen DEFAULT_MODEL. Capture the client main() builds; grade offline so nothing hits the network.
+    monkeypatch.setenv("LLM_OPENAI_BASE_URL", "https://x/api/v1")
+    monkeypatch.setenv("LLM_OPENAI_API_KEY", "k")
+    monkeypatch.setenv("WIKITIZER_GBF_MODEL", "")      # blank also beats a stray .env value
+    seen = {}
+    real_grade = cli.grade_file
+
+    def spy_grade(wof_path, gold, ranks, **kw):
+        seen["client"] = kw["model_client"]
+        kw.update(use_model=False, model_client=None)
+        return real_grade(wof_path, gold, ranks, **kw)
+
+    monkeypatch.setattr(cli, "grade_file", spy_grade)
+    wof, gold, ranks = _files(tmp_path)
+    assert main(["--gold", str(gold), "--ranks", str(ranks), str(wof)]) == 0
+    assert seen["client"] is not None and seen["client"].model == DEFAULT_GBF_MODEL
 
 
 def test_main_missing_gold_returns_2(tmp_path):

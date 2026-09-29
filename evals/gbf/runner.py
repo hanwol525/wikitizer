@@ -14,10 +14,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Optional, Tuple
 
-from evals.common import DEFAULT_MODEL, DEFAULT_PROVIDER, DEFAULT_TEMPERATURE
+from evals.common import DEFAULT_PROVIDER, DEFAULT_TEMPERATURE
 from evals.common.models import Engine, Evidence, Item, Status
 from evals.common.parse import ParsedWOF, parse_wof
-from evals.gbf import DEFAULT_GBF_VOTES, DEFAULT_MAX_WORKERS
+from evals.gbf import DEFAULT_GBF_MODEL, DEFAULT_GBF_VOTES, DEFAULT_MAX_WORKERS
 from evals.gbf.adjudicator import GbfAdjudicator
 from evals.gbf.emit import build_result
 from evals.gbf.models import GbfResult
@@ -61,7 +61,7 @@ def _model_cfg(model_client, votes: int) -> dict:
     # Always populated (GBF's single grader is a ModelGrader). When there's no client (the --no-model
     # path) the defaults stand in, so the grader entry is still schema-valid.
     return {
-        "name": getattr(model_client, "model", None) or DEFAULT_MODEL,
+        "name": getattr(model_client, "model", None) or DEFAULT_GBF_MODEL,
         "provider": getattr(model_client, "provider", None) or DEFAULT_PROVIDER,
         "temperature": float(getattr(model_client, "temperature", DEFAULT_TEMPERATURE)),
         "thinking": bool(getattr(model_client, "thinking", False)),
